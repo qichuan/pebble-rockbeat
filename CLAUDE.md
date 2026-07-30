@@ -92,33 +92,41 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   initialisation. Never trust `persist_exists()` as proof a key is unset — and
   keep the +1 flag encoding (1 = false, 2 = true) so a zero is distinguishable.
 
+- **The game plays ONE line: the melody, extracted from the MIDI.** The chart is
+  built from the same notes, so every note hit is a note heard. Do not reintroduce
+  the full arrangement without reading the README section on why it was dropped:
+  four fixed-amplitude waveforms cannot carry a dense pop arrangement on a driver
+  this small, and three rounds of tuning (drum sample, waveform choice, octave
+  lifting, sustain caps) reduced the noise without removing its cause.
+
+- **Melody extraction is the skyline algorithm** (highest sounding note wins),
+  after picking a channel. **Density is a hard filter, not a scoring term** --
+  scoring it alongside pitch picked a 25-note counter-line (0.44/s) over the
+  158-note alto sax carrying the tune, because it sat higher and was monophonic.
+  Selected here: channel 15, GM program 65.
+
+- **Transpose a melody as a UNIT, never per note.** Per-note octave lifting is
+  fine for a bass pulse but destroys a melody -- raising some notes and not their
+  neighbours breaks the contour and the tune stops being recognisable.
+
+- **These are speaker properties, not synthesis ones, and they bit hardest:**
+  - A watch speaker cannot move below a few hundred Hz. This MIDI's bass sat at
+    **39-69Hz** and 84% of pitched notes were under 400Hz; driven there the driver
+    emits only upper harmonics, i.e. a buzz with no pitch. The melody is
+    transposed to 415-831Hz. Check a part's FREQUENCY before assuming it is fine.
+  - **`speaker_play_tracks()` has no envelope.** A note holds at constant
+    amplitude for its whole duration, so a 1907ms note is a drone, which reads as
+    buzz. `MAX_SUSTAIN_MS` caps them into plucks.
+  - **Monophonic tracks click at every note boundary** unless a release gap is
+    left. `NOTE_GAP_MS` takes it out of the note, not off the next one's start.
+  - **Sine has no harmonics**, and harmonics are what a small speaker
+    exaggerates. Square as an accompaniment was the second-worst noise source.
+
 - **The music is MIDI played by the watch's note sequencer, not a recording.**
   `speaker_play_tracks()` takes `SpeakerNote` arrays; `tools/make_chart.py`
   parses the `.mid` at build time and emits them as `music.c`. This replaced a
-  911 KB PCM resource with ~10 KB of tables — a 90× cut that took total
-  resources from 915,373 bytes to 4,213 and made the app publishable.
-
-- **Everything about the sequencer is measured; the SDK documents almost none of
-  it.** All of this is in `music.h`, and all of it was found the hard way:
-  - `SPEAKER_MAX_NOTES` (256) is a **per-track** cap, not per-call — 4 tracks of
-    128 plays fine.
-  - **Exceeding it faults the app**, it does not return false. The generator
-    refuses to emit an over-long chunk; there is no runtime guard because by
-    then it is too late.
-  - Chaining the next chunk from the finish callback costs **no audible gap**,
-    and drift against the game clock is jitter (+17/−5/−12/+41/−30 ms per 4 s
-    chunk), not a rate error.
-  - The **first** `speaker_play_tracks()` call costs ~200 ms of startup latency
-    that later calls do not — hence `RB_MUSIC_LATENCY_MS`.
-  - **A PCM stream cannot coexist with the sequencer**: `speaker_stream_open()`
-    returns false while tracks play. The music survives (finishes `Done`, not
-    `Preempted`). This is why there are no reactive hit sounds any more — the
-    two audio sources are mutually exclusive and the music won.
-
-- **Measure sequencer timing only after the clock has settled.** The first
-  attempt reported 2–8% drift and looked like a fatal rate error; it was
-  measuring `clock.c` calibrating during its first seconds. Waiting 15 s before
-  sampling turned the same numbers into ±40 ms of jitter.
+  911 KB PCM resource with under 3 KB of tables -- total resources went from
+  915,373 bytes to 4,213 and the app became publishable.
 
 - **The clock is a self-calibrating tick, and must stay that way.** `time_ms()`
   has one trustworthy half and one useless half on the emulator: the seconds

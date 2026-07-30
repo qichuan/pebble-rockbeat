@@ -171,10 +171,6 @@
 
 #define RB_AUDIO_VOLUME 70
 
-// Which of the 4 tracks is sample-backed. The generator puts percussion last;
-// the other three sound one of the built-in waveforms.
-#define RB_MUSIC_PERC_TRACK 3
-
 // Music starts at the same offset as the first note, so the audio and the chart
 // share one origin. Also gives the player a beat of runway before note one.
 #define RB_MUSIC_START_MS 2000

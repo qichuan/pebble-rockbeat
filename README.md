@@ -188,9 +188,8 @@ The chart and the music are both generated from one MIDI file,
 `watch/resources/data/Never-Gonna-Give-You-Up.mid`. Nothing is hand-placed and
 there is no audio recording anywhere in the project.
 
-**56.9 seconds, 118 BPM, 112 notes (1.97/s), 28 of them big.** A bar-aligned
-28-bar section starting at bar 12, which skips the count-in and begins on a
-downbeat.
+**56.9 seconds, 118 BPM, 89 notes (1.56/s).** A bar-aligned 28-bar section
+starting at bar 12, which skips the count-in and begins on a downbeat.
 
 ### Why MIDI, and not the mp3
 
@@ -198,61 +197,35 @@ This project first charted an mp3 with a spectral-flux onset detector: STFT,
 per-band flux, peak-picking, comb-filter tempo estimation. It worked in the sense
 that it found onsets, and it still produced a chart the player described as
 following no rhythm at all — because onset detection *infers* a grid that the
-score already states exactly. Tempo came out as an estimate, beat phase as an
-estimate, and per-note instrument assignment as a guess about which frequency
-band was loudest.
+score already states exactly.
 
 MIDI removes all of that inference. Note-on ticks and tempo meta-events give the
-exact grid, and channel 9 identifies the drum kit by name rather than by
-frequency. The whole analysis pipeline was deleted; `make_chart.py` is now
+exact grid. The whole analysis pipeline was deleted; `make_chart.py` is now
 **Python stdlib only** — no numpy, no ffmpeg, no soundfont, nothing to install.
 
 ### How the chart is chosen
 
-Drum notes (MIDI channel 9) are grouped by sixteenth, one kept per group —
-otherwise simultaneous kick+hat layers become impossible two-button chords. Each
-candidate is weighted by velocity, plus a role bonus for kick and snare, plus a
-beat bonus (90 on a bar downbeat, 70 on a beat, 26 on an eighth, 0 on a
-sixteenth). Candidates are then taken in **weight order, not time order**.
+The chart is built from **the melody notes themselves** — the same notes the
+watch plays — so every note the player hits is a note they can hear. (An earlier
+version charted the drum part while the music played the whole arrangement, which
+was defensible then and would be incoherent now.)
 
-Selecting in time order inverts the chart. Spacing rules mean accepting a note
-forbids its neighbours, so whoever is considered first wins — and walking the
-song chronologically hands that priority to whatever comes first, almost always a
-hi-hat, with the kick 300 ms later then failing the spacing rule. Measured on
-that version: **19 of 117 notes on the beat, 98 between them, lanes split 101 hat
-/ 11 snare / 5 kick.** Weight-ordered selection lays the pulse down first.
+**Lane follows pitch**: melody notes above the line's median go to the upper
+lane, below it to the lower one. So the lane pattern is the shape of the tune,
+and the mapping means something on screen rather than being arbitrary.
 
-#### The two-lane split, and what it costs
+Notes are weighted by velocity plus a beat bonus (90 on a bar downbeat, 70 on a
+beat, 26 on an eighth, 0 on a sixteenth) and taken in **weight order, not time
+order**. Selecting in time order inverts a chart: spacing rules mean accepting a
+note forbids its neighbours, so whoever is considered first wins, and walking the
+song chronologically hands that priority to whatever happens to come first.
+Weight-ordered selection lays the pulse down before filler can compete.
 
-Lanes follow the kit, cutting between **kick and snare**:
-
-| Lane | Button | MIDI pitches | What it is |
-|---|---|---|---|
-| MIDDLE | SELECT | < 38 | kick, low toms |
-| TOP | UP | ≥ 38 | snare, clap, hats, cymbals |
-
-The intuitive split is membranes vs metal (drums on one lane, cymbals on the
-other). It fails badly: kick and snare alternate on every beat, so putting them
-in the same lane saturates it — measured **112 notes on one lane against 12** on
-the other. Cutting between kick and snare instead puts that alternation *across*
-the lanes, giving **56/56 and 100% hand alternation** — the pattern a drummer
-actually plays.
-
-**Two lanes also forces the chart to be exactly the beat grid, and no generator
-setting changes that.** A beat here is 508 ms, so an eighth offbeat sits 254 ms
-from the beats either side of it — inside `SAME_LANE_MIN_MS` (333 ms) and
-therefore illegal in its own lane. With three lanes an offbeat could take the
-third lane; with two, both are already carrying beat notes, so it is illegal in
-both. Once all 112 beats of the section are placed, nothing else fits anywhere:
-sweeping `NOTES_PER_SEC` from 2.2 to 3.4 and the beat bonus from 70 to 30
-produced **exactly 112 notes every time**.
-
-So the two-lane chart is fully alternating and easy to play, but has no
-syncopation available. Getting offbeats back needs either a third lane or a
-smaller `RB_MISS_MS` — which is what sets the 333 ms floor, via the rule that two
-notes in a lane must never have overlapping judgment windows
-(`2 * RB_MISS_MS` = 320). `tools/run_tests.sh` asserts that invariant against the
-shipped chart.
+Three spacing rules then apply: 333 ms minimum in the same lane, 240 ms globally,
+and a ceiling of 2.2 notes/sec. The 333 ms figure is not musical — it is
+deliberately just above `2 * RB_MISS_MS` = 320 ms, so no two notes in one lane
+can ever have overlapping judgment windows. `tools/run_tests.sh` asserts that
+invariant against the shipped chart.
 
 ### Regenerating
 
@@ -276,30 +249,81 @@ intended binary layout is documented at the top of `chart.h`.
 
 The watch has no MIDI file parser — but it does have a **note sequencer**.
 `speaker_play_tracks()` takes arrays of `SpeakerNote {midi_note, waveform,
-duration_ms, velocity}` across up to 4 parallel monophonic tracks. So the MIDI is
-parsed at build time and emitted as those arrays in `music.c`. The watch plays
-notes; it does not play a recording.
+duration_ms, velocity}`. So the MIDI is parsed at build time and emitted as those
+arrays in `music.c`. The watch plays notes; it does not play a recording.
 
-That is worth about 90×:
+**It plays one line: the melody.** Everything else in the arrangement is
+discarded, and the chart is built from the same melody notes — so every note the
+player hits is a note they can hear.
 
 | | bytes |
 |---|---|
-| previous build: pre-rendered 16 kHz PCM resource | 911,160 |
-| now: note tables + one drum sample | ~10,100 |
+| original build: pre-rendered 16 kHz PCM resource | 911,160 |
+| four-track reduction of the full arrangement | ~13,100 |
+| **melody only** | **~2,800** |
 
-Total app resources went from **915,373 bytes to 4,213** — which takes the build
-from three and a half times over the 256 KB app-store limit to comfortably under
-it. The old build could not have been published at all.
+Total app resources are **4,213 bytes** against the 256 KB app-store limit. The
+original PCM build was 915,373 — three and a half times over it.
 
-Three tracks sound built-in waveforms (triangle bass, square mid, sine lead). The
-fourth is percussion, and it plays a **1.5 KB noise burst pitch-shifted** across
-the kit rather than a pitch, because the four waveforms contain no noise between
-them and a "drum" built from a sine is just a low blip.
+### Melody extraction
 
-The reduction is lossy by necessity: the section peaks at **14 simultaneous MIDI
-notes against 4 mono tracks**. Splitting by register keeps the bass line and the
-top line intact — the parts that carry the tune — and sacrifices inner harmony
-where it collides.
+The melody is found with the **skyline algorithm** — within each moment, the
+highest sounding note is the melody — following the approach in
+[xinyiguan/MIDI_Melody_Extraction](https://github.com/xinyiguan/MIDI_Melody_Extraction).
+That script is not used directly: it depends on `mido` (this generator is
+deliberately stdlib-only) and it hard-filters to MIDI channel 0, which this file
+does not have — its channels are 2,3,4,7,8,9,13,15. So the algorithm is
+reimplemented against our own parser, with the channel *chosen* rather than
+assumed.
+
+Channel selection scores each channel on how much it behaves like a lead line.
+The important detail is that **density is a hard filter, not a scoring term**.
+Scoring it alongside pitch picked the wrong channel: a 25-note high string
+counter-line (0.44 notes/sec) outscored the 158-note alto sax carrying the tune,
+because it sat an octave higher and was perfectly monophonic. A melody has to
+have enough notes to *be* the melody, so anything under 1 note/sec is not a
+candidate at all; only then does pitch-versus-polyphony decide.
+
+For this file it selects **channel 15, GM program 65 (Alto Sax), 157 notes**.
+
+The whole line is then transposed **up one octave as a unit**, to 415–831 Hz.
+Transposing as a unit matters: per-note octave lifting (which is fine for a bass
+pulse) would raise some notes and not their neighbours, breaking the contour so
+the tune stops being recognisable.
+
+### Why one line, and not the arrangement
+
+The first attempt reduced the full arrangement to four tracks. It sounded noisy,
+and three rounds of tuning reduced the noise without removing its cause:
+
+- **Percussion was 45% of the song and every bit of it was white noise** (a 95 ms
+  burst, pitch-shifted — downshifted for the kick that became a *427 ms rumble of
+  stretched static*). Replacing it with a real drum hit and thinning the hats took
+  it to 27.5%.
+- **The mid track was a square wave sounding 84% of the time** — a continuous
+  buzzsaw, not an accompaniment. Triangle helped.
+- **The bass sat at 39–69 Hz**, with 84% of all pitched notes below 400 Hz. A
+  watch speaker cannot move at those frequencies; driven at 39 Hz it emits only
+  upper harmonics, a buzz with no pitch in it. Octave-lifting fixed the
+  frequency but not the fundamental problem.
+
+The fundamental problem is that **four fixed-amplitude waveforms cannot carry a
+dense pop arrangement on a driver this small**. Simultaneous tones intermodulate
+rather than summing cleanly. One clean line is something the speaker *can*
+reproduce, so that is what it plays.
+
+Three properties of the sequencer shape the output, all of which still apply:
+
+- **There is no envelope.** A note sounds at constant amplitude for its whole
+  duration, so this MIDI's 1907 ms notes were two seconds of unchanging tone — a
+  drone, which reads as buzz. `MAX_SUSTAIN_MS` caps them into plucks.
+- **Monophonic tracks click at note boundaries.** Consecutive notes butt together
+  and the waveform steps discontinuously. `NOTE_GAP_MS` leaves 18 ms of silence
+  at the end of each note, taken out of the note rather than off the next one's
+  start, so the rhythm is untouched.
+- **Sine, because it has no harmonics at all.** Every other available waveform is
+  defined by its harmonic series, and harmonics are what a small speaker
+  exaggerates. With one voice nothing needs a bright timbre to cut through.
 
 ### Everything below was measured, not documented
 
@@ -313,34 +337,25 @@ with a throwaway spike on the emulator, and two of them are sharp edges:
   because by then it is too late.
 - Chaining the next chunk from the finish callback costs **no audible gap**, and
   drift against the game clock over six consecutive 4-second chunks was
-  +17/−5/−12/+41/−30 ms — jitter, not a rate error. The music does not walk away
-  from the notes, so no correction is needed.
+  +17/−5/−12/+41/−30 ms — jitter, not a rate error.
 - The **first** `speaker_play_tracks()` call costs ~200 ms of startup latency
-  that later calls do not. Hence `RB_MUSIC_LATENCY_MS`: the first call is issued
-  that much early, or the whole track sits a fifth of a beat behind.
+  that later calls do not. Hence `RB_MUSIC_LATENCY_MS`.
 - **A PCM stream cannot coexist with the sequencer.** `speaker_stream_open()`
   returns false while tracks are playing (the music itself is unharmed — it
-  finishes `Done`, not `Preempted`).
-
-That last one is why **there are no reactive hit sounds any more**. The two audio
-sources are mutually exclusive, so it was music or per-press drum hits, not both.
-The drum part is in the music, so the player still hears the beat they are
-hitting; hit *confirmation* is haptics plus the on-screen flash.
+  finishes `Done`, not `Preempted`). This is why there are no reactive hit
+  sounds: the two audio sources are mutually exclusive.
 
 Measuring the sequencer needs one piece of care: sample it only **after the game
 clock has settled**. The first attempt reported 2–8% drift and looked like a
 fatal rate error, but it was measuring `clock.c` calibrating during its first
-seconds. Waiting 15 s before sampling turned the same numbers into ±40 ms of
-jitter.
+seconds. Waiting 15 s turned the same numbers into ±40 ms of jitter.
 
 The music is released against **song time, not an AppTimer**, for the same
-reason. The clock loses ~2 s during its early calibration (verified: the
-clock-to-wall offset climbs to ~2 s over the first 10 s and is then flat for the
-rest of the song), so a real-time timer armed for "1800 ms from now" fires while
-the song clock still reads ~1300 — starting the music the better part of a second
-ahead of its notes, permanently. `audio_tick()` takes elapsed song time as a
-parameter and `audio.c` does not include `clock.h` at all, so the one-way
-dependency is structural: audio follows the clock, never the reverse.
+reason. The clock loses ~2 s during early calibration, so a real-time timer armed
+for "1800 ms from now" fires while the song clock still reads ~1300 — starting
+the music the better part of a second ahead of its notes, permanently.
+`audio_tick()` takes elapsed song time as a parameter and `audio.c` does not
+include `clock.h` at all, so the one-way dependency is structural.
 
 ## Platform
 

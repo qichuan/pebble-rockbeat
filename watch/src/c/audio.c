@@ -71,15 +71,16 @@ static void prv_play_chunk(uint16_t index) {
   }
 
   SpeakerTrack tracks[MUSIC_TRACKS];
-  for (uint8_t t = 0; t < MUSIC_TRACKS; t++) {
+  const uint8_t count = (chunk->track_count < MUSIC_TRACKS) ? chunk->track_count
+                                                            : MUSIC_TRACKS;
+  for (uint8_t t = 0; t < count; t++) {
     tracks[t].notes = chunk->notes[t];
     tracks[t].num_notes = chunk->counts[t];
-    // Only the percussion track is sample-backed; the rest use their waveform.
-    tracks[t].sample = (t == RB_MUSIC_PERC_TRACK) ? music_drum_sample() : NULL;
+    tracks[t].sample = NULL;  // waveform synthesis; no sample-backed track now
   }
 
   s_next_chunk = (uint16_t)(index + 1);
-  if (!speaker_play_tracks(tracks, MUSIC_TRACKS, RB_AUDIO_VOLUME)) {
+  if (!speaker_play_tracks(tracks, count, RB_AUDIO_VOLUME)) {
 #if RB_DEBUG_LOG_AUDIO
     APP_LOG(APP_LOG_LEVEL_DEBUG, "speaker_play_tracks failed at chunk %u", (unsigned)index);
 #endif

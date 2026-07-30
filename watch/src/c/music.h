@@ -8,7 +8,13 @@
 // speaker_play_tracks() takes arrays of {midi_note, waveform, duration_ms,
 // velocity}. So the MIDI is parsed at build time and shipped as those arrays.
 // That is why this project no longer carries a 911KB PCM resource -- the same
-// section is ~10KB of note tables plus one 1.5KB drum sample.
+// section is under 3KB of note tables.
+//
+// It is ONE track: the melody line, extracted from the MIDI by the skyline
+// algorithm and transposed into the speaker's usable band. A four-track
+// reduction of the full arrangement was tried first and sounded noisy no matter
+// how it was tuned -- see the README. Four fixed-amplitude waveforms cannot
+// carry a dense pop arrangement on a driver this small; one clean line can.
 //
 // Everything below was MEASURED on the emery emulator; the SDK header documents
 // only the two cap constants and none of the behaviour.
@@ -38,6 +44,7 @@
 typedef struct {
   const SpeakerNote *notes[MUSIC_TRACKS];
   uint16_t counts[MUSIC_TRACKS];
+  uint8_t track_count;   // 1 today; the array allows an arrangement to come back
   uint32_t start_ms;     // offset into the song at which this chunk sounds
   uint32_t duration_ms;  // every track in a chunk is padded to exactly this
 } MusicChunk;
@@ -46,10 +53,5 @@ uint16_t music_chunk_count(void);
 
 // NULL past the end -- which is how audio.c detects the song is over.
 const MusicChunk *music_chunk(uint16_t index);
-
-// One noise burst the percussion track pitch-shifts into a whole kit. The four
-// built-in waveforms contain no noise, so a sample is the only way to get a
-// drum that reads as a drum rather than as a low blip.
-const SpeakerSample *music_drum_sample(void);
 
 uint32_t music_total_ms(void);

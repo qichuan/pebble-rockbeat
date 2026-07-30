@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+import math
 
 from pathlib import Path
 import struct
@@ -98,38 +99,35 @@ CHUNK_BARS = 4                  # ~8.1s at 118 BPM; keeps each track far under t
 
 WAVE_SINE, WAVE_SQUARE, WAVE_TRIANGLE, WAVE_SAWTOOTH = 0, 1, 2, 3
 
-# Which register each melodic track takes.  The section peaks at 14 simultaneous
-# notes against 4 mono tracks, so this reduction drops notes by design; splitting
-# by register keeps the bass line and the top line intact, which is what carries
-# the tune, and sacrifices inner harmony where it collides.
-TRACK_BASS, TRACK_MID, TRACK_LEAD, TRACK_PERC = 0, 1, 2, 3
-REGISTER_SPLITS = (48, 70)      # < 48 bass, < 70 mid, else lead
+# Sine, because it has no harmonics at all.
+#
+# Every other waveform available here is defined by its harmonic series, and
+# harmonics are exactly what a small speaker exaggerates -- the square-wave
+# accompaniment in the previous build was the second-worst noise source after
+# the sub-bass. With one voice there is no need for a bright timbre to cut
+# through anything, so the cleanest option is also the right one.
+MELODY_WAVE = WAVE_SINE
+MELODY_VELOCITY = 100
 
-TRACK_WAVE = {
-    TRACK_BASS: WAVE_TRIANGLE,  # rounder than square; the tiny speaker has no
-                                # low end, so a bright bass reads as a buzz
-    TRACK_MID: WAVE_SQUARE,
-    TRACK_LEAD: WAVE_SINE,
-}
+# Transpose the melody, as a whole, so its median lands at least here.
+# MIDI 72 = 523Hz, comfortably inside a watch speaker's usable band; this MIDI's
+# melody sits at 208-415Hz, where the driver is weak and mostly emits harmonics.
+MELODY_TARGET_MEDIAN = 72
 
-# Percussion is played by pitch-shifting one short noise burst rather than by
-# sounding a pitch, because the four waveforms have no noise between them and a
-# "drum" built from a sine is just a low blip.  SPEAKER_MAX_SAMPLE_BYTES_TOTAL
-# is 16KB across all tracks; this uses ~1.5KB of it.
-DRUM_SAMPLE_MS = 95
-DRUM_SAMPLE_RATE = 16000
-DRUM_SAMPLE_BASE_NOTE = 72      # shifting DOWN stretches the burst, which is
-                                # exactly the kick/hat relationship
+# Nothing sustains longer than this; the remainder of a longer note becomes rest.
+#
+# speaker_play_tracks() has no envelope -- a note plays at constant amplitude for
+# its whole duration -- so a long note is a drone rather than a decaying tone,
+# and a drone on a small speaker reads as buzz.
+MAX_SUSTAIN_MS = 260
 
-# Where each drum lands on that sample's keyboard.  Lower = longer and duller.
-DRUM_PITCH = {
-    35: 46, 36: 46,             # kick
-    38: 62, 39: 64, 40: 62,     # snare / clap
-    41: 50, 43: 52, 45: 55, 47: 58, 48: 60, 50: 62,   # toms
-    42: 84, 44: 82, 46: 79,     # hats
-    49: 74, 51: 78, 52: 74, 53: 78, 55: 74, 57: 74, 59: 78,   # cymbals
-}
-DRUM_MS = {"kick": 150, "snare": 130, "hat": 70, "cymbal": 260}
+# Silence inserted at the end of every sounding note.
+#
+# Without it, consecutive notes butt directly against each other and the waveform
+# steps discontinuously at the boundary -- a click per note boundary, which reads
+# as a continuous crackle. Taken out of the note rather than off the next one's
+# start, so the rhythm is untouched.
+NOTE_GAP_MS = 18
 
 
 @dataclass(frozen=True)
@@ -153,7 +151,7 @@ def read_vlq(data: bytes, pos: int) -> tuple[int, int]:
             return value, pos
 
 
-def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote]]:
+def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote], dict[int, int]]:
     data = path.read_bytes()
     if data[:4] != b"MThd" or len(data) < 14:
         raise ValueError(f"{path} is not a Standard MIDI file")
@@ -167,6 +165,7 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote]]:
     pos = 8 + header_len
     tempos = [(0, 500000)]
     notes: list[MidiNote] = []
+    programs: dict[int, int] = {}
     for _ in range(tracks):
         if data[pos:pos + 4] != b"MTrk":
             raise ValueError("missing MIDI track chunk")
@@ -206,6 +205,8 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote]]:
             length = 1 if kind in (0xC0, 0xD0) else 2
             payload = track[cursor:cursor + length]
             cursor += length
+            if kind == 0xC0 and channel not in programs:
+                programs[channel] = payload[0]
             if kind not in (0x80, 0x90) or len(payload) != 2:
                 continue
             pitch, velocity = payload
@@ -226,7 +227,7 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote]]:
             compact_tempos[-1] = (tick, tempo)
         else:
             compact_tempos.append((tick, tempo))
-    return division, compact_tempos, sorted(notes, key=lambda note: note.start)
+    return division, compact_tempos, sorted(notes, key=lambda note: note.start), programs
 
 
 def make_tick_to_ms(tempos: list[tuple[int, int]], ticks_per_beat: int):
@@ -250,24 +251,97 @@ def make_tick_to_ms(tempos: list[tuple[int, int]], ticks_per_beat: int):
     return tick_to_ms
 
 
-def drum_lane(pitch: int) -> int:
-    """Kick on the lower lane, everything else on the upper one.
+# ---------------------------------------------------------------------------
+# Melody extraction
+#
+# The arrangement is reduced to a single melodic line before anything else
+# happens, and the game plays only that.
+#
+# This is the "skyline" algorithm -- within each moment, the highest sounding
+# note is the melody -- following the approach in
+# https://github.com/xinyiguan/MIDI_Melody_Extraction. That script is not used
+# directly for two reasons: it depends on `mido`, and this generator is
+# deliberately stdlib-only; and it hard-filters to MIDI channel 0, which this
+# file does not have (its channels are 2,3,4,7,8,9,13,15). So the algorithm is
+# reimplemented here against the parser above, with the channel chosen rather
+# than assumed.
+#
+# Why melody-only at all: four fixed-amplitude waveforms on a watch speaker
+# cannot carry a dense pop arrangement. Every previous attempt to clean it up --
+# thinning percussion, octave-lifting the bass, capping sustains -- reduced the
+# noise without removing its cause, which is simply too many simultaneous tones
+# for the hardware. One clean line is something the speaker CAN reproduce.
+# ---------------------------------------------------------------------------
 
-    This is the backbeat split, and with two lanes it is the only one that
-    balances.  Cutting at 42 instead (membranes vs metal, the intuitive
-    "drums and cymbals" reading) puts kick AND snare together, and since those
-    two alternate on every beat they saturate that lane by themselves: measured
-    112 notes on the lower lane against 12 on the upper.  Cutting at 38 puts the
-    kick/snare alternation ACROSS the lanes, which is both a 56/56 balance and
-    100% hand alternation -- the pattern a drummer actually plays.
+# GM program families that are never the melody, whatever their pitch.
+NON_MELODY_PROGRAMS = set(range(32, 40)) | set(range(88, 96))   # basses, pads
+
+
+# A melody must carry at least this many notes per second to be a candidate.
+MELODY_MIN_RATE = 1.0
+
+
+def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to_ms) -> int:
+    """Score each channel on how much it behaves like a lead line.
+
+    Density is a HARD filter, not a scoring term. Scoring it alongside pitch
+    picked the wrong channel here: a 25-note high string counter-line (0.44
+    notes/sec) outscored the 158-note alto sax carrying the actual tune, because
+    it sat an octave higher and was perfectly monophonic. A melody has to have
+    enough notes to BE the melody, so anything under MELODY_MIN_RATE is not a
+    candidate at all; only then does pitch-versus-polyphony decide.
     """
-    return 0 if pitch < 38 else 1
+    section = [n for n in notes if START_TICK <= n.start < END_TICK and n.channel != 9]
+    best, best_score = None, None
+    for channel in sorted({n.channel for n in section}):
+        group = [n for n in section if n.channel == channel]
+        program = programs.get(channel)
+        if program is not None and program in NON_MELODY_PROGRAMS:
+            continue
+        events = []
+        for note in group:
+            events += [(note.start, 1), (note.end, -1)]
+        events.sort()
+        depth = peak = 0
+        for _tick, delta in events:
+            depth += delta
+            peak = max(peak, depth)
+        span_ms = tick_to_ms(END_TICK) - tick_to_ms(START_TICK)
+        if len(group) / (span_ms / 1000.0) < MELODY_MIN_RATE:
+            continue
+        pitches = sorted(n.pitch for n in group)
+        median = pitches[len(pitches) // 2]
+        # Among channels dense enough to be a tune, prefer the one that is high
+        # and plays one note at a time. Chords and pads lose on polyphony.
+        score = (median - 48) / 12.0 - (peak - 1) * 1.5
+        if best_score is None or (score, len(group)) > (best_score, 0):
+            best, best_score = channel, score
+    if best is None:
+        raise ValueError("no melodic channel found in the selected MIDI section")
+    return best
 
 
-def drum_weight(note: MidiNote) -> int:
-    # Kick and snare establish the pulse; hats fill it in only if there is room.
-    role_bonus = 48 if note.pitch in (35, 36, 38, 39, 40) else 14
-    return note.velocity + role_bonus
+def extract_melody(notes: list[MidiNote], channel: int) -> list[MidiNote]:
+    """Skyline within the chosen channel, forced monophonic.
+
+    Where notes overlap, the higher one wins and the lower is dropped rather
+    than shortened -- a melody that ducks to an inner voice for 40ms reads as a
+    glitch, not as counterpoint.
+    """
+    group = sorted((n for n in notes
+                    if n.channel == channel and START_TICK <= n.start < END_TICK),
+                   key=lambda n: (n.start, -n.pitch))
+    melody: list[MidiNote] = []
+    for note in group:
+        if melody and note.start < melody[-1].end:
+            if note.pitch <= melody[-1].pitch:
+                continue                      # covered by a higher note
+            melody[-1] = MidiNote(melody[-1].start, note.start, melody[-1].channel,
+                                  melody[-1].pitch, melody[-1].velocity)
+            if melody[-1].end <= melody[-1].start:
+                melody.pop()
+        melody.append(note)
+    return melody
 
 
 def beat_bonus(tick_offset: int) -> int:
@@ -292,38 +366,51 @@ def beat_bonus(tick_offset: int) -> int:
     return 0                            # sixteenth filler
 
 
-def build_chart(notes: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]]:
-    drums = [note for note in notes if note.channel == 9 and START_TICK <= note.start < END_TICK]
-    source = drums or [note for note in notes if START_TICK <= note.start < END_TICK]
-    slots: dict[int, list[MidiNote]] = defaultdict(list)
-    for note in source:
-        slots[round((note.start - START_TICK) / SLOT_TICKS)].append(note)
+def melody_octave_shift(melody: list[MidiNote]) -> int:
+    """Transpose the WHOLE line by whole octaves into the speaker's range.
+
+    Per-note lifting (which is what PITCH_FLOOR does for accompaniment) would
+    destroy a melody: raising some notes an octave and not their neighbours
+    breaks the contour and the tune stops being recognisable. A constant shift
+    preserves every interval exactly.
+    """
+    pitches = sorted(n.pitch for n in melody)
+    median = pitches[len(pitches) // 2]
+    shift = 0
+    while median + shift < MELODY_TARGET_MEDIAN:
+        shift += 12
+    return shift
+
+
+def build_chart(melody: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]]:
+    """One chart note per melody note, subject to the playability spacing rules.
+
+    Now that the game plays only the melody, the chart is built from the SAME
+    notes -- so every note the player hits is a note they can hear. Previously
+    the chart came from the drum part while the music played everything, which
+    was defensible then and would be incoherent now.
+
+    Lane follows PITCH: notes above the melody's median go to the upper lane,
+    below it to the lower one. That makes the lane mapping mean something on
+    screen -- the line's shape is the pattern the hands play.
+    """
+    origin = tick_to_ms(START_TICK)
+    pitches = sorted(n.pitch for n in melody)
+    split = pitches[len(pitches) // 2]
 
     candidates: list[tuple[int, int, int, int]] = []
-    for slot in sorted(slots):
-        group = slots[slot]
-        # One intent per rhythmic subdivision.  This prevents simultaneous drum
-        # layers (kick + hat) becoming impossible two-button chords.
-        note = max(group, key=drum_weight)
-        lane = drum_lane(note.pitch) if note.channel == 9 else int(note.pitch >= 60)
-        time_ms = LEAD_MS + int(round(tick_to_ms(note.start) - tick_to_ms(START_TICK)))
+    for note in melody:
+        time_ms = LEAD_MS + int(round(tick_to_ms(note.start) - origin))
         offset = note.start - START_TICK
-        downbeat = offset % (TICKS_PER_BEAT_REQUIRED * BEATS_PER_BAR) == 0
-        big = int(downbeat or note.velocity >= 116)
-        candidates.append((time_ms, lane, big, drum_weight(note) + beat_bonus(offset)))
+        lane = 1 if note.pitch >= split else 0
+        held = tick_to_ms(note.end) - tick_to_ms(note.start)
+        big = int(offset % (TICKS_PER_BEAT_REQUIRED * BEATS_PER_BAR) == 0
+                  or note.velocity >= 116 or held >= 700)
+        candidates.append((time_ms, lane, big, note.velocity + beat_bonus(offset)))
 
-    # Select by musical importance, NOT in time order.
-    #
-    # Spacing rules mean accepting one note forbids others nearby, so whoever is
-    # considered first wins. Walking the song chronologically hands that priority
-    # to whatever happens to come first -- usually a hi-hat -- and the kick or
-    # snare right after it gets refused. Sorting by weight first means the pulse
-    # is laid down before filler is allowed to compete for the same space.
-    #
-    # The preferred lane is honoured strictly rather than falling back to a
-    # neighbour: the lane mapping is the thing that makes the chart readable as
-    # the drum part, and a kick relocated to the hi-hat lane to dodge a spacing
-    # rule is worse than no note at all.
+    if not candidates:
+        raise ValueError("no melody notes in selected MIDI section")
+
     span_ms = max(c[0] for c in candidates) - min(c[0] for c in candidates)
     budget = max(1, int(NOTES_PER_SEC * span_ms / 1000.0))
 
@@ -339,106 +426,34 @@ def build_chart(notes: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]]
 
     chart = sorted(chosen)
     if not chart:
-        raise ValueError("no playable notes found in selected MIDI section")
+        raise ValueError("no playable notes survived the spacing rules")
     return chart
 
 
-def drum_ms(pitch: int) -> int:
-    if pitch < 38:
-        return DRUM_MS["kick"]
-    if pitch < 42:
-        return DRUM_MS["snare"]
-    if pitch in (49, 51, 52, 53, 55, 57, 59):
-        return DRUM_MS["cymbal"]
-    return DRUM_MS["hat"]
+def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
+    """One monophonic melody track, split into chunks.
 
-
-def render_drum_sample() -> bytes:
-    """One decaying noise burst, pitch-shifted by the sequencer into a whole kit.
-
-    Deterministic LCG rather than `random`, so regenerating the project byte-for
-    byte does not depend on Python's seeding.
+    Chunks exist for two reasons. The hard one is SPEAKER_MAX_NOTES: a track may
+    not exceed 256 notes, and going over faults the app instead of failing. The
+    useful one is that chaining chunks from the finish callback is the only place
+    the music can be re-anchored to the game clock.
     """
-    length = DRUM_SAMPLE_MS * DRUM_SAMPLE_RATE // 1000
-    out = bytearray(length)
-    state = 0x13579BDF
-    for i in range(length):
-        state = (state * 1103515245 + 12345) & 0x7FFFFFFF
-        # Fast exponential-ish decay: sharp attack, short tail, which survives a
-        # watch speaker better than a linear fade.
-        envelope = (1.0 - i / length) ** 3
-        value = int((((state >> 16) & 0xFF) - 128) * envelope)
-        out[i] = (max(-127, min(127, value)) + 256) & 0xFF
-    return bytes(out)
-
-
-def allocate_tracks(notes: list[MidiNote], tick_to_ms) -> list[list[tuple[int, int, int, int]]]:
-    """Reduce polyphonic MIDI to TRACKS monophonic voices.
-
-    Returns, per track, a list of (start_ms, end_ms, midi_note, velocity) with
-    no overlaps -- which is what a SpeakerTrack is: one note at a time.
-
-    Notes are considered loudest-first within each register so that when two
-    collide the quieter one is the one dropped.  A note that would overlap an
-    already-placed note in its own track is discarded rather than bumped to a
-    neighbouring track: moving a bass note into the lead voice would be audible
-    as a wrong note, which is worse than a thinner texture.
-    """
-    lanes: list[list[tuple[int, int, int, int]]] = [[] for _ in range(TRACKS)]
-
-    def register(pitch: int) -> int:
-        if pitch < REGISTER_SPLITS[0]:
-            return TRACK_BASS
-        return TRACK_MID if pitch < REGISTER_SPLITS[1] else TRACK_LEAD
-
-    section = [n for n in notes if START_TICK <= n.start < END_TICK]
-    origin = tick_to_ms(START_TICK)
-    ordered = sorted(section, key=lambda n: (n.start, -n.velocity))
-
-    for note in ordered:
-        start = int(round(tick_to_ms(note.start) - origin))
-        if note.channel == 9:
-            track = TRACK_PERC
-            pitch = DRUM_PITCH.get(note.pitch, 70)
-            end = start + drum_ms(note.pitch)
-        else:
-            track = register(note.pitch)
-            pitch = note.pitch
-            end = start + max(60, int(round(tick_to_ms(note.end) - tick_to_ms(note.start))))
-        if end <= start:
-            continue
-        placed = lanes[track]
-        if placed and start < placed[-1][1]:
-            # Overlaps the note already sounding. Truncating the previous note
-            # is preferable to dropping this one when the overlap is slight --
-            # legato in the source should not silence the next note.
-            prev_start, prev_end, prev_pitch, prev_vel = placed[-1]
-            if start - prev_start >= 40:
-                placed[-1] = (prev_start, start, prev_pitch, prev_vel)
-            else:
-                continue
-        placed.append((start, end, pitch, note.velocity))
-
-    return lanes
-
-
-def build_music(notes: list[MidiNote], tick_to_ms):
-    """Turn the allocated voices into per-chunk SpeakerNote sequences.
-
-    Chunks exist for two reasons.  The hard one is SPEAKER_MAX_NOTES: a track
-    may not exceed 256 notes, and going over faults the app instead of failing.
-    The useful one is that chaining chunks from the finish callback is the only
-    place the music can be re-anchored to the game clock, so a chunk boundary is
-    a resync point.
-
-    Every track in a chunk is padded to the SAME duration.  Without that a short
-    track ends early and the next chunk cannot start until the longest finishes,
-    so the voices would walk apart from each other a little more each chunk.
-    """
-    lanes = allocate_tracks(notes, tick_to_ms)
     origin = tick_to_ms(START_TICK)
     total_ms = int(round(tick_to_ms(END_TICK) - origin))
     chunk_ticks = CHUNK_BARS * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+
+    placed: list[tuple[int, int, int, int]] = []
+    for note in melody:
+        start_ms = int(round(tick_to_ms(note.start) - origin))
+        held = int(round(tick_to_ms(note.end) - tick_to_ms(note.start)))
+        end_ms = start_ms + max(60, min(held, MAX_SUSTAIN_MS))
+        if placed and start_ms < placed[-1][1]:
+            end_prev = min(placed[-1][1], start_ms)
+            if end_prev <= placed[-1][0]:
+                placed.pop()
+            else:
+                placed[-1] = (placed[-1][0], end_prev, placed[-1][2], placed[-1][3])
+        placed.append((start_ms, end_ms, note.pitch + shift, note.velocity))
 
     bounds = []
     tick = START_TICK
@@ -450,62 +465,47 @@ def build_music(notes: list[MidiNote], tick_to_ms):
 
     chunks = []
     for chunk_start, chunk_end in bounds:
-        tracks = []
-        for track_index, placed in enumerate(lanes):
-            seq: list[tuple[int, int, int, int]] = []   # note, wave, ms, velocity
-            cursor = chunk_start
-            wave = TRACK_WAVE.get(track_index, WAVE_SAWTOOTH)
-            for start, end, pitch, velocity in placed:
-                if start >= chunk_end or end <= chunk_start:
-                    continue
-                start = max(start, chunk_start)
-                end = min(end, chunk_end)
-                if end - start < 15:
-                    continue
-                if start > cursor:
-                    seq.append((0, wave, start - cursor, 0))   # rest
-                seq.append((pitch, wave, end - start, min(127, velocity)))
-                cursor = end
-            if cursor < chunk_end:
-                seq.append((0, wave, chunk_end - cursor, 0))
-            if len(seq) > MAX_NOTES_PER_TRACK:
-                raise ValueError(
-                    f"track {track_index} needs {len(seq)} notes in one chunk, "
-                    f"over the {MAX_NOTES_PER_TRACK} cap -- lower CHUNK_BARS")
-            tracks.append(seq)
-        chunks.append((chunk_start, chunk_end - chunk_start, tracks))
+        seq: list[tuple[int, int, int, int]] = []
+        cursor = chunk_start
+        for start_ms, end_ms, pitch, velocity in placed:
+            if start_ms >= chunk_end or end_ms <= chunk_start:
+                continue
+            start_ms = max(start_ms, chunk_start)
+            end_ms = min(end_ms, chunk_end)
+            if end_ms - start_ms < 25:
+                continue
+            if start_ms > cursor:
+                seq.append((0, MELODY_WAVE, start_ms - cursor, 0))
+            sounding = end_ms - start_ms
+            if sounding > NOTE_GAP_MS + 25:
+                sounding -= NOTE_GAP_MS
+            seq.append((pitch, MELODY_WAVE, sounding, min(MELODY_VELOCITY, velocity)))
+            if end_ms - start_ms > sounding:
+                seq.append((0, MELODY_WAVE, (end_ms - start_ms) - sounding, 0))
+            cursor = end_ms
+        if cursor < chunk_end:
+            seq.append((0, MELODY_WAVE, chunk_end - cursor, 0))
+        if len(seq) > MAX_NOTES_PER_TRACK:
+            raise ValueError(f"chunk needs {len(seq)} notes, over the "
+                             f"{MAX_NOTES_PER_TRACK} cap -- lower CHUNK_BARS")
+        chunks.append((chunk_start, chunk_end - chunk_start, [seq]))
 
     return chunks, total_ms
 
 
-def write_music(chunks, total_ms: int, sample: bytes) -> tuple[int, int]:
+def write_music(chunks, total_ms: int) -> int:
     parts = ['#include "music.h"\n',
              "// GENERATED FILE -- do not hand-edit. Regenerate with tools/make_chart.py.\n"
              "//\n"
-             "// The music is played by the watch's note sequencer, not streamed as audio:\n"
-             "// these are SpeakerNote arrays for speaker_play_tracks(). See music.h for the\n"
-             "// measured limits that shape them, and audio.c for the chunk chaining.\n"]
-
-    rows = ",\n".join("  " + ", ".join(f"0x{b:02x}" for b in sample[i:i + 12])
-                      for i in range(0, len(sample), 12))
-    parts.append(f"// One noise burst, pitch-shifted by the sequencer into the whole kit.\n"
-                 f"static const uint8_t s_drum_pcm[{len(sample)}] = {{\n{rows}\n}};\n")
-    parts.append(f"""static const SpeakerSample s_drum_sample = {{
-  .data = s_drum_pcm,
-  .num_bytes = sizeof(s_drum_pcm),
-  .format = SpeakerPcmFormat_16kHz_8bit,
-  .base_midi_note = {DRUM_SAMPLE_BASE_NOTE},
-  .loop = false,
-}};
-""")
+             "// A single monophonic melody line for speaker_play_tracks(). See music.h for\n"
+             "// the measured sequencer limits, and audio.c for the chunk chaining.\n"]
 
     total_notes = 0
     for chunk_index, (_start, _duration, tracks) in enumerate(chunks):
         for track_index, seq in enumerate(tracks):
             total_notes += len(seq)
-            body = "\n".join(
-                f"  {{ {note:3d}, {wave}, {ms:5d}, {vel:3d}, 0 }},"
-                for note, wave, ms, vel in seq)
+            body = "\n".join(f"  {{ {note:3d}, {wave}, {ms:5d}, {vel:3d}, 0 }},"
+                              for note, wave, ms, vel in seq)
             parts.append(f"static const SpeakerNote s_c{chunk_index}_t{track_index}[] = {{\n"
                          f"{body}\n}};\n")
 
@@ -513,7 +513,7 @@ def write_music(chunks, total_ms: int, sample: bytes) -> tuple[int, int]:
     for chunk_index, (start, duration, tracks) in enumerate(chunks):
         names = ", ".join(f"s_c{chunk_index}_t{t}" for t in range(len(tracks)))
         counts = ", ".join(str(len(seq)) for seq in tracks)
-        entries.append(f"  {{ {{ {names} }},\n    {{ {counts} }}, {start}, {duration} }},")
+        entries.append(f"  {{ {{ {names} }}, {{ {counts} }}, {len(tracks)}, {start}, {duration} }},")
     parts.append("static const MusicChunk s_chunks[] = {\n" + "\n".join(entries) + "\n};\n")
 
     parts.append(f"""uint16_t music_chunk_count(void) {{
@@ -524,13 +524,10 @@ const MusicChunk *music_chunk(uint16_t index) {{
   return (index < music_chunk_count()) ? &s_chunks[index] : NULL;
 }}
 
-const SpeakerSample *music_drum_sample(void) {{ return &s_drum_sample; }}
-
 uint32_t music_total_ms(void) {{ return {total_ms}; }}
 """)
-
     MUSIC_C.write_text("\n".join(parts))
-    return total_notes, len(sample)
+    return total_notes
 
 
 def write_chart(chart: list[tuple[int, int, int]], duration_s: float, tick_to_ms) -> None:
@@ -580,11 +577,15 @@ def main() -> None:
     if len(sys.argv) > 2:
         sys.exit(__doc__)
     midi = Path(sys.argv[1]) if len(sys.argv) == 2 else DEFAULT_MIDI
-    ticks_per_beat, tempos, notes = parse_midi(midi)
+    ticks_per_beat, tempos, notes, programs = parse_midi(midi)
     tick_to_ms = make_tick_to_ms(tempos, ticks_per_beat)
 
-    chart = build_chart(notes, tick_to_ms)
-    chunks, total_ms = build_music(notes, tick_to_ms)
+    channel = pick_melody_channel(notes, programs, tick_to_ms)
+    melody = extract_melody(notes, channel)
+    shift = melody_octave_shift(melody)
+
+    chart = build_chart(melody, tick_to_ms)
+    chunks, total_ms = build_music(melody, shift, tick_to_ms)
 
     # duration_ms is uint16 and the SDK caps a note at 10000ms; a chunk-long
     # rest is the longest value emitted, so checking the chunk covers every note.
@@ -593,17 +594,21 @@ def main() -> None:
         raise ValueError(f"chunk of {longest}ms exceeds the 10000ms note cap -- lower CHUNK_BARS")
 
     duration_s = total_ms / 1000.0
-    note_count, sample_bytes = write_music(chunks, total_ms, render_drum_sample())
+    note_count = write_music(chunks, total_ms)
     write_chart(chart, duration_s, tick_to_ms)
 
     per_lane = Counter(lane for _t, lane, _b in chart)
+    pitches = [n.pitch + shift for n in melody]
+    lo = 440 * 2 ** ((min(pitches) - 69) / 12)
+    hi = 440 * 2 ** ((max(pitches) - 69) / 12)
     print(f"{midi.name}: {len(notes)} MIDI notes in file, {duration_s:.1f}s section")
-    print(f"chart: {len(chart)} notes ({len(chart) / duration_s:.2f}/s), "
+    print(f"melody: channel {channel} (GM program {programs.get(channel)}), "
+          f"{len(melody)} notes, transposed +{shift // 12} octave(s) "
+          f"-> {lo:.0f}-{hi:.0f}Hz")
+    print(f"chart:  {len(chart)} notes ({len(chart) / duration_s:.2f}/s), "
           f"lanes {LANE_NAMES[0]}={per_lane[0]} {LANE_NAMES[1]}={per_lane[1]}")
-    print(f"music: {len(chunks)} chunks, {note_count} SpeakerNotes, "
-          f"{sample_bytes}B drum sample")
-    print(f"       ~{note_count * 6 + sample_bytes} bytes of flash "
-          f"(was 911160 as PCM)")
+    print(f"music:  {len(chunks)} chunks, {note_count} SpeakerNotes, "
+          f"~{note_count * 6} bytes of flash (was 911160 as PCM)")
     print(f"wrote {CHART_C}\n      {MUSIC_C}")
 
 
