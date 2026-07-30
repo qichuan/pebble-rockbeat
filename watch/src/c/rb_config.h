@@ -58,12 +58,19 @@
 // popping.
 #define RB_CULL_MARGIN 24
 
-// Travel from x=-16 to the target at x=168 is 184px; at 95px/s that is a ~1.94s
-// read-ahead. Cut from 120px/s (1.53s) after play-testing: at 90 BPM a beat is
-// 667ms, so the slower speed puts nearly three beats of runway on screen, which
-// is what makes an approaching note readable rather than a surprise. The chart
-// is sparse enough now that the extra dwell does not crowd the lanes.
-#define RB_SCROLL_PX_PER_SEC 95
+// Travel from x=-16 to the target at x=168 is 184px; at 120px/s that is a ~1.53s
+// read-ahead.
+//
+// Speed is now a LEGIBILITY constraint, not a taste one. The chart carries every
+// melody note, so notes come as close as 127ms apart, and two notes 127ms apart
+// at 95px/s were 12px apart -- closer than one note's diameter, so a run of
+// sixteenths merged into a smear. At 120px/s the same pair is 15px apart and the
+// tightest SAME-lane pair (an eighth, 254ms) is 30px, which clears a normal
+// note's 22px diameter.
+//
+// Raising it further would fix nothing and cost read-ahead, which at this
+// density is the scarcer resource: 1.53s is about four notes of runway.
+#define RB_SCROLL_PX_PER_SEC 120
 
 // ---------------------------------------------------------------------------
 // Judgment windows (milliseconds either side of the note's hit_time_ms)
@@ -78,18 +85,25 @@
 // touch the clock, which is already correct.
 // ---------------------------------------------------------------------------
 
-// Widened from 45/100 after play-testing. Part of why hitting anything felt
-// impossible was the clock lurching (fixed in clock.c), but the windows were
-// also tight for a wrist-mounted button with mechanical travel, and the clock
-// now quantises to RB_CLOCK_TICK_MS which spends some of the budget.
+// RB_MISS_MS is not a free choice -- it is set by the chart, and the chart is now
+// every melody note. The tightest interval between two notes in one lane is an
+// eighth, 254ms at 118 BPM, and two judgment windows must fit inside that or a
+// single press sits in both and the notes stop being individually hittable. So
+// 2 * RB_MISS_MS <= 254, and 125 takes it with 4ms to spare.
 //
-// RB_MISS_MS stays at 160 deliberately: the chart generator guarantees 333ms
-// between notes in a lane, and 2*160 = 320 is what keeps their windows from
-// overlapping. Raising it past 166 would break that and must be done together
-// with SAME_LANE_MIN_MS in tools/make_chart.py.
-#define RB_PERFECT_MS 60
-#define RB_GOOD_MS 125
-#define RB_MISS_MS 160  // beyond this a note auto-misses; presses become strays
+// It came down from 160, which was possible only while the chart was a selected
+// subset with 333ms of clearance. Charting every note bought exactness at the
+// cost of some of the timing budget; that is the trade, and it is the right way
+// round for a rhythm game. Anything here must move together with
+// SAME_LANE_MIN_MS in tools/make_chart.py, which asserts the gap it produces.
+//
+// Perfect stays generous. The press timestamp is exact and the clock no longer
+// quantises in direct mode, but app-task dispatch latency between the physical
+// button and the click handler is still not measurable from inside the app, so
+// the window has to absorb an unknown few milliseconds.
+#define RB_PERFECT_MS 55
+#define RB_GOOD_MS 100
+#define RB_MISS_MS 125  // beyond this a note auto-misses; presses become strays
 
 // ---------------------------------------------------------------------------
 // Scoring
@@ -201,17 +215,20 @@
 // at the wrist at all. 45 is the shortest that reads as a distinct tap.
 #define RB_VIBE_NORMAL_MS 45
 
-// Clearly heavier than a normal tap, still under the 333ms gap between
-// consecutive eighth notes at 90 BPM. Pebble vibration is coarse on/off with no
+// Clearly heavier than a normal tap, and still inside the 254ms gap between
+// consecutive eighth notes at 118 BPM. Pebble vibration is coarse on/off with no
 // amplitude control, so pulse LENGTH is the only lever for "harder".
 #define RB_VIBE_BIG_MS 120
 
 // Minimum spacing between normal pulses: pattern length plus spin-down plus
 // margin. Below this the motor never fully stops and separate hits smear into
-// one continuous buzz, losing the per-note feel. The charted excerpt places
-// notes as little as 167ms apart across lanes, so on the densest runs some
-// pulses are deliberately skipped -- that is the drop being made predictable
-// rather than left to the SDK.
+// one continuous buzz, losing the per-note feel.
+//
+// The chart now carries every melody note, so a sixteenth run puts hits 127ms
+// apart -- under this figure, and deliberately so. Those runs get a pulse on
+// roughly every other note rather than a continuous blur. That is the drop being
+// made predictable instead of left to the SDK, which would drop them anyway and
+// arbitrarily.
 #define RB_VIBE_MIN_GAP_MS 130
 
 // ---------------------------------------------------------------------------

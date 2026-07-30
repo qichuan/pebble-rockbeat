@@ -322,8 +322,9 @@ static void test_builtin_chart_is_valid(void) {
     // THE invariant the generated chart has to respect. Two notes in one lane
     // closer than 2*RB_MISS_MS have overlapping judgment windows, which means a
     // single press sits inside both and they stop being individually hittable.
-    // The chart generator enforces one eighth at 90 BPM (333ms) precisely
-    // because it clears this bound.
+    // The chart generator enforces SAME_LANE_MIN_MS (250ms) precisely because it
+    // clears this bound: the chart is every melody note, so the tightest
+    // same-lane interval is an eighth at 118 BPM (254ms).
     if (seen_lane[n->lane]) {
       const uint32_t gap = n->hit_time_ms - last_in_lane[n->lane];
       CHECK(gap > 2 * RB_MISS_MS, "lane %u notes only %lums apart at %lums -- windows overlap",

@@ -59,9 +59,9 @@ void feedback_silence(void) {
 // it, so the policy here is about making the drops predictable:
 //
 //   normal notes -- rate-limit, never cancel. Every pulse the player feels is a
-//     clean, full-length tap. At 120 BPM the chart's tightest spacing is 250ms,
-//     comfortably above RB_VIBE_MIN_GAP_MS, so nothing is actually dropped;
-//     denser charts degrade by thinning out rather than by stuttering.
+//     clean, full-length tap. The chart's tightest spacing is a sixteenth,
+//     127ms, which is below RB_VIBE_MIN_GAP_MS -- so a fast run thins out to a
+//     pulse on roughly every other note rather than stuttering into one buzz.
 //
 //   big notes -- cancel first, then fire. A big note is the accent of the bar
 //     and must always be felt, so it is allowed to cut a normal pulse short.

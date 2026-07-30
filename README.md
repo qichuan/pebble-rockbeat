@@ -64,7 +64,7 @@ The judgment windows, scoring and combo logic are unit-tested on the host, with
 no emulator involved:
 
 ```bash
-./tools/run_tests.sh      # expect: OK: 2187 checks passed
+./tools/run_tests.sh      # expect: OK: 2595 checks passed
 ```
 
 This works because `game.c` and `chart.c` do not include `<pebble.h>` — they are
@@ -213,7 +213,7 @@ The chart and the music are both generated from one MIDI file,
 `watch/resources/data/melody.mid`. Nothing is hand-placed and there is no audio
 recording anywhere in the project.
 
-**56.9 seconds, 118 BPM, 89 notes (1.56/s).** A bar-aligned 28-bar section
+**56.9 seconds, 118 BPM, 157 notes (2.76/s) — every melody note.** A bar-aligned 28-bar section
 starting at bar 12, which skips the count-in and begins on a downbeat.
 
 ### Why MIDI, and not the mp3
@@ -228,29 +228,56 @@ MIDI removes all of that inference. Note-on ticks and tempo meta-events give the
 exact grid. The whole analysis pipeline was deleted; `make_chart.py` is now
 **Python stdlib only** — no numpy, no ffmpeg, no soundfont, nothing to install.
 
-### How the chart is chosen
+### The chart is every melody note
 
-The chart is built from **the melody notes themselves** — the same notes the
-watch plays — so every note the player hits is a note they can hear. (An earlier
-version charted the drum part while the music played the whole arrangement, which
-was defensible then and would be incoherent now.)
+**One note heard, one note to hit.** All 157 melody notes are charted, 1:1 —
+nothing is selected, weighted or dropped. And because the chart and the music are
+placed from the same tempo map at the same offset (`LEAD_MS` equals
+`RB_MUSIC_START_MS`), a chart note's hit time *is* the moment its tone sounds:
+pressing on the note and pressing on the beat are the same action.
 
-**Lane follows pitch**: melody notes above the line's median go to the upper
-lane, below it to the lower one. So the lane pattern is the shape of the tune,
-and the mapping means something on screen rather than being arbitrary.
+An earlier generator chose 89 of the 157 by weight under a density ceiling, which
+meant 68 notes sounded with nothing to press — the tune and the chart told
+different stories.
 
-Notes are weighted by velocity plus a beat bonus (90 on a bar downbeat, 70 on a
-beat, 26 on an eighth, 0 on a sixteenth) and taken in **weight order, not time
-order**. Selecting in time order inverts a chart: spacing rules mean accepting a
-note forbids its neighbours, so whoever is considered first wins, and walking the
-song chronologically hands that priority to whatever happens to come first.
-Weight-ordered selection lays the pulse down before filler can compete.
+What makes charting all of them possible is that this melody sits on an exact
+sixteenth grid. Every interval between consecutive notes is one of:
 
-Three spacing rules then apply: 333 ms minimum in the same lane, 240 ms globally,
-and a ceiling of 2.2 notes/sec. The 333 ms figure is not musical — it is
-deliberately just above `2 * RB_MISS_MS` = 320 ms, so no two notes in one lane
-can ever have overlapping judgment windows. `tools/run_tests.sh` asserts that
+| gap | count | |
+|---|---|---|
+| 127 ms | 31 | sixteenth |
+| 254 ms | 82 | eighth |
+| ≥ 320 ms | 43 | |
+
+Nothing awkward in between, so the whole problem reduces to one question: what
+happens when two notes are 127 ms apart?
+
+**They go to different lanes.** Lane follows pitch — above the line's median to
+the upper lane, below to the lower — so the lane pattern is the shape of the
+tune. But where pitch would put two close notes in one lane, spacing wins and the
+note takes the other lane (29 of 157 do). A 127 ms same-lane repeat is roughly
+eight presses a second on one button, which is not playable; alternating hands at
+that rate is exactly what a Taiko-style game is for. A sixteenth run therefore
+comes out as a strict left-right-left-right zigzag.
+
+Forcing that alternation has a second effect that matters more: it makes **254 ms
+the smallest possible gap between two notes in one lane**, and that is the number
+the judgment windows have to live inside — hence `RB_MISS_MS` of 125. Charting
+every note bought exactness at the cost of some timing budget. `make_chart.py`
+asserts the gap it produces, and `tools/run_tests.sh` asserts the resulting
 invariant against the shipped chart.
+
+### Accents have to be measured relative to the part
+
+24 notes are "big" — drawn larger, worth double, given a heavier buzz — from bar
+downbeats and long holds.
+
+The velocity test that also feeds this is **relative to the line's median**, and
+that is not a stylistic choice. An absolute threshold (`velocity >= 116`) sat
+here and silently marked *every* note big, because this melody was sequenced flat
+at 119–124. It went unnoticed while the chart was still a subset. A relative
+margin finds accents on an expressively played part and correctly finds none on a
+flat one, which is the honest answer — a flat part has no accents.
 
 ### Regenerating
 
@@ -286,7 +313,8 @@ would silently shift which part of the song gets charted.
 That writes **both** `watch/src/c/chart.c` and `watch/src/c/music.c` from the
 same tempo map, so the notes and the music cannot drift apart. Both are generated
 — do not hand-edit either. Section and density live at the top of the script
-(`START_BAR`, `BARS`, `NOTES_PER_SEC`).
+(`START_BAR`, `BARS`); density is not a knob any more -- the chart is every
+melody note.
 
 Charts are `{ hit_time_ms, lane, type }` arrays sorted ascending by time. The
 loader is written so a chart can later come from a resource file instead of being

@@ -23,7 +23,7 @@ pebble logs --emulator emery
 pebble kill
 ```
 
-From the repo root: `./tools/run_tests.sh` (expect `OK: 2187 checks passed`).
+From the repo root: `./tools/run_tests.sh` (expect `OK: 2595 checks passed`).
 
 This tool version does **not** accept `--scale`. `--vnc` disables emulator audio.
 
@@ -277,14 +277,36 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   the SELECT button. `render.c` therefore divides by `RB_LANE_SLOTS` (3) and
   leaves the bottom band empty. Do not "tidy" that back to `RB_LANE_COUNT`.
 
-- **At two lanes the chart is exactly the beat grid, and no generator knob
-  changes that.** A beat is 508ms at 118 BPM, so an eighth offbeat sits 254ms
-  from its neighbours — inside `SAME_LANE_MIN_MS` (333, itself forced by
-  `2 * RB_MISS_MS`) and therefore illegal in its own lane. With three lanes an
-  offbeat could take the third; with two, both are already carrying beat notes,
-  so it is illegal in both. Sweeping `NOTES_PER_SEC` 2.2→3.4 and the beat bonus
-  70→30 produced exactly 112 notes every time. Syncopation needs a third lane or
-  a smaller `RB_MISS_MS`.
+- **The chart is EVERY melody note, 1:1. Do not reintroduce selection.** 157
+  notes for 157 melody notes, so a note heard is always a note to hit and a note
+  hit is always a note heard. Both come from the same tempo map at the same
+  offset (`LEAD_MS` == `RB_MUSIC_START_MS`), so a chart note's hit time *is* the
+  moment its tone sounds.
+
+  This is only possible because the melody sits on an exact sixteenth grid —
+  every interval is 127ms, 254ms, or ≥320ms, with nothing awkward between. Two
+  things make it playable:
+  - **Lane follows pitch, except when spacing overrides it.** A note whose
+    preferred lane was used within `SAME_LANE_MIN_MS` takes the other lane (29
+    of 157 do). That is what guarantees the minimum same-lane gap is an eighth
+    (254ms) rather than a sixteenth — a 127ms same-lane repeat is ~8 presses a
+    second on one button, unplayable, whereas alternating hands at that rate is
+    the whole point of a Taiko-style game.
+  - **`RB_MISS_MS` is therefore 125, not a free choice.** Two judgment windows
+    must fit inside 254ms. It came down from 160, which was only possible while
+    the chart was a subset with 333ms of clearance. `make_chart.py` asserts the
+    gap it produces and `run_tests.sh` asserts it against the shipped chart.
+
+  The old generator chose 89 of 157 by weight under a density ceiling, so 68
+  notes sounded with nothing to press. `NOTES_PER_SEC`, `GLOBAL_MIN_MS` and
+  `beat_bonus()` existed only to serve that selection and are gone.
+
+- **Accent tests on a MIDI part must be RELATIVE, not absolute.** `velocity >=
+  116` marked *every* note big, because this melody was sequenced flat at
+  119-124. It went unnoticed while the chart was a subset. The test is now
+  median + `BIG_VELOCITY_MARGIN`, which finds accents on an expressive part and
+  correctly finds none on a flat one — 24 of 157 now, all from bar downbeats and
+  long holds.
 
 - **Split the kit at pitch 38, not 42.** "Membranes vs metal" is the intuitive
   two-lane split and it fails: kick and snare alternate on every beat, so putting

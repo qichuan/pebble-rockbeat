@@ -57,33 +57,50 @@ END_TICK = START_TICK + BARS * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
 LEAD_MS = 2000
 TAIL_MS = 2500
 
-# A sixteenth is used only to collect simultaneous MIDI events.  The actual
-# event time is kept, then spacing rules make the resulting chart playable.
-SLOT_TICKS = TICKS_PER_BEAT_REQUIRED // 4
-SAME_LANE_MIN_MS = 333          # > 2 * RB_MISS_MS
-# Must sit BELOW an eighth note (254ms at 118 BPM) or offbeats are structurally
-# impossible: with 300 here, accepting every beat forbade everything between
-# them, and the chart collapsed to a rigid kick/snare alternation on two lanes
-# with the hi-hat lane completely unused.
-GLOBAL_MIN_MS = 240
+# ---------------------------------------------------------------------------
+# The chart is EVERY melody note. One note heard, one note to hit.
+#
+# Nothing is selected, weighted or dropped any more. The previous generator chose
+# 89 of the 157 melody notes by weight, subject to a density ceiling and a global
+# spacing rule, which meant 68 notes sounded with nothing to press -- the tune
+# and the chart told different stories.
+#
+# What makes charting all of them possible is that this melody sits on an exact
+# sixteenth grid. Measured over the charted section, EVERY interval between
+# consecutive notes is one of:
+#
+#     127/128ms  (sixteenth)   31 of them
+#     254/255ms  (eighth)      82
+#     >= 320ms                 43
+#
+# There is nothing awkward in between, so the whole problem reduces to a single
+# question: what happens when two notes are only 127ms apart?
+#
+# They go to different lanes -- see the lane rule in build_chart(). A 127ms
+# same-lane repeat is roughly eight presses a second on one button, which is not
+# playable, whereas alternating hands at that rate is exactly what a Taiko-style
+# game is for. Forcing that alternation also has a second effect that matters
+# more: it makes 254ms the smallest possible gap BETWEEN TWO NOTES IN ONE LANE,
+# and that is the number the judgment windows have to live inside.
+# ---------------------------------------------------------------------------
 
-# Density ceiling, notes per second.  It is a safety ceiling for other songs,
-# NOT the thing that sets this chart's density -- at two lanes and 118 BPM the
-# spacing rules bind first and this value does not bind at all.
+# Two notes in one lane closer than this would have overlapping judgment windows,
+# so the lane assignment guarantees it and the unit tests assert it against the
+# shipped chart.
 #
-# Worth understanding before tuning it, because it looks like the density knob
-# and is not.  A beat here is 508ms, so an eighth offbeat sits 254ms from the
-# beats either side of it, which is inside SAME_LANE_MIN_MS (333) and therefore
-# illegal in its own lane.  With three lanes an offbeat could take a third lane;
-# with two, both lanes are already carrying beat notes, so it is illegal in both.
-# Once all 112 beats of the section are placed nothing else can fit ANYWHERE:
-# sweeping this from 2.2 to 3.4 and the beat bonus from 70 to 30 produced exactly
-# 112 notes every time.
+# It is a hard floor of 2 * RB_MISS_MS, and it is why RB_MISS_MS is 125: an
+# eighth is 254ms at 118 BPM, so 2 * 125 = 250 fits underneath it with 4ms to
+# spare, and 160 (the old value) would not have. Change one and you must change
+# the other -- in this direction, RB_MISS_MS <= SAME_LANE_MIN_MS / 2.
+SAME_LANE_MIN_MS = 250
+
+# What makes a note "big" -- drawn larger, worth double, and given a heavier
+# buzz. Bar downbeats always qualify; beyond that, a note is an accent if it is
+# struck harder than the line's median by this margin, or held this long.
 #
-# The consequence is that the two-lane chart is precisely the beat grid -- fully
-# alternating and easy, but with no syncopation available. Getting offbeats back
-# needs either a third lane or a smaller RB_MISS_MS (which sets the 333 floor).
-NOTES_PER_SEC = 2.2
+# The margin is relative for a reason: see the note in build_chart().
+BIG_VELOCITY_MARGIN = 8
+BIG_HELD_MS = 700
 
 # Lane 0 is the LOWER of the two lanes on screen.  Only the top two lanes are
 # used now, so lane 0 = MIDDLE (SELECT) and lane 1 = TOP (UP); the DOWN button
@@ -367,28 +384,6 @@ def extract_melody(notes: list[MidiNote], channel: int,
     return melody
 
 
-def beat_bonus(tick_offset: int) -> int:
-    """Reward notes that land where a listener feels the pulse.
-
-    Without this the chart inverts itself.  Hi-hats occur on every subdivision
-    and outnumber kick and snare several times over, so a selector that walks
-    the song in time order takes a hat on the "and", and the kick 300ms later
-    then fails the spacing rule and is dropped.  Measured on the first attempt:
-    only 19 of 117 notes fell on the four beats, 98 fell between them, and the
-    lane split was 101 hat / 11 snare / 5 kick.  The chart was almost pure
-    filler with the backbone removed.
-    """
-    beat = TICKS_PER_BEAT_REQUIRED
-    bar = beat * BEATS_PER_BAR
-    if tick_offset % bar == 0:
-        return 90                       # bar downbeat -- never drop these
-    if tick_offset % beat == 0:
-        return 70                       # on the beat
-    if tick_offset % (beat // 2) == 0:
-        return 26                       # eighth -- the "and", worth keeping
-    return 0                            # sixteenth filler
-
-
 def melody_octave_shift(melody: list[MidiNote]) -> int:
     """Transpose the WHOLE line by whole octaves into the speaker's range.
 
@@ -406,51 +401,79 @@ def melody_octave_shift(melody: list[MidiNote]) -> int:
 
 
 def build_chart(melody: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]]:
-    """One chart note per melody note, subject to the playability spacing rules.
+    """One chart note per melody note. Every note. No selection, no dropping.
 
-    Now that the game plays only the melody, the chart is built from the SAME
-    notes -- so every note the player hits is a note they can hear. Previously
-    the chart came from the drum part while the music played everything, which
-    was defensible then and would be incoherent now.
+    The chart and the music come from the same list, so a note heard is always a
+    note to hit and a note hit is always a note heard. Because both are placed
+    from the same tempo map at the same offset, a chart note's hit time IS the
+    moment its tone sounds -- pressing on the beat and pressing on the note are
+    the same action.
 
-    Lane follows PITCH: notes above the melody's median go to the upper lane,
-    below it to the lower one. That makes the lane mapping mean something on
-    screen -- the line's shape is the pattern the hands play.
+    Lane follows PITCH where it can: notes above the melody's median go to the
+    upper lane, below it to the lower one, so the lane pattern is the shape of
+    the tune and means something on screen.
+
+    Where it cannot, spacing wins. Pitch does not care how fast the line moves,
+    and two notes 127ms apart in one lane are unplayable -- roughly eight presses
+    a second on one button -- as well as being closer than two judgment windows
+    can sit. So a note whose preferred lane is still busy takes the other one.
+    That is what guarantees SAME_LANE_MIN_MS across the whole chart, and with it
+    the invariant the unit tests check.
     """
     origin = tick_to_ms(START_TICK)
     pitches = sorted(n.pitch for n in melody)
     split = pitches[len(pitches) // 2]
 
-    candidates: list[tuple[int, int, int, int]] = []
+    if not melody:
+        raise ValueError("no melody notes in selected MIDI section")
+
+    # The velocity accent is RELATIVE to this line, not an absolute threshold.
+    #
+    # An absolute one was here (velocity >= 116) and it silently marked every
+    # single note big: this melody's velocities run 119-124, because the part was
+    # sequenced flat, so the test was true 157 times out of 157. A relative
+    # margin degrades to marking nothing on a flat part -- which is the honest
+    # answer, since a flat part HAS no accents -- while still finding them on an
+    # expressively played one.
+    velocities = sorted(n.velocity for n in melody)
+    accent_velocity = velocities[len(velocities) // 2] + BIG_VELOCITY_MARGIN
+
+    chart: list[tuple[int, int, int]] = []
+    last_in_lane = [-10 ** 9, -10 ** 9]
+    forced = 0
     for note in melody:
         time_ms = LEAD_MS + int(round(tick_to_ms(note.start) - origin))
         offset = note.start - START_TICK
-        lane = 1 if note.pitch >= split else 0
         held = tick_to_ms(note.end) - tick_to_ms(note.start)
         big = int(offset % (TICKS_PER_BEAT_REQUIRED * BEATS_PER_BAR) == 0
-                  or note.velocity >= 116 or held >= 700)
-        candidates.append((time_ms, lane, big, note.velocity + beat_bonus(offset)))
+                  or note.velocity >= accent_velocity
+                  or held >= BIG_HELD_MS)
 
-    if not candidates:
-        raise ValueError("no melody notes in selected MIDI section")
+        preferred = 1 if note.pitch >= split else 0
+        other = 1 - preferred
+        if time_ms - last_in_lane[preferred] >= SAME_LANE_MIN_MS:
+            lane = preferred
+        elif time_ms - last_in_lane[other] >= SAME_LANE_MIN_MS:
+            lane = other
+            forced += 1
+        else:
+            # Both lanes are still busy. With two lanes this needs three notes
+            # inside SAME_LANE_MIN_MS of each other, which this melody never
+            # does -- the tightest run is 127+127=254ms. Refuse rather than emit
+            # a chart whose judgment windows overlap: silently dropping the note
+            # would break the one-note-one-press promise, and keeping it would
+            # break the tests, so neither is a quiet option.
+            raise ValueError(
+                f"note at {time_ms}ms cannot be placed {SAME_LANE_MIN_MS}ms clear "
+                f"in either lane (lanes last used at {last_in_lane}). This song "
+                f"is denser than two lanes can carry -- it needs a third lane, or "
+                f"a smaller RB_MISS_MS and SAME_LANE_MIN_MS to match.")
 
-    span_ms = max(c[0] for c in candidates) - min(c[0] for c in candidates)
-    budget = max(1, int(NOTES_PER_SEC * span_ms / 1000.0))
+        last_in_lane[lane] = time_ms
+        chart.append((time_ms, lane, big))
 
-    chosen: list[tuple[int, int, int]] = []
-    for time_ms, lane, big, _weight in sorted(candidates, key=lambda c: -c[3]):
-        if len(chosen) >= budget:
-            break
-        if any(abs(time_ms - t) < GLOBAL_MIN_MS for t, _l, _b in chosen):
-            continue
-        if any(abs(time_ms - t) < SAME_LANE_MIN_MS for t, l, _b in chosen if l == lane):
-            continue
-        chosen.append((time_ms, lane, big))
-
-    chart = sorted(chosen)
-    if not chart:
-        raise ValueError("no playable notes survived the spacing rules")
-    return chart
+    chart.sort()
+    return chart, forced
 
 
 def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
@@ -620,7 +643,7 @@ def main() -> None:
     melody = extract_melody(notes, channel)
     shift = melody_octave_shift(melody)
 
-    chart = build_chart(melody, tick_to_ms)
+    chart, forced = build_chart(melody, tick_to_ms)
     chunks, total_ms = build_music(melody, shift, tick_to_ms)
 
     # duration_ms is uint16 and the SDK caps a single note at 10000ms. Long rests
@@ -642,8 +665,19 @@ def main() -> None:
     print(f"melody: channel {channel} (GM program {programs.get(channel)}), "
           f"{len(melody)} notes, transposed +{shift // 12} octave(s) "
           f"-> {lo:.0f}-{hi:.0f}Hz")
-    print(f"chart:  {len(chart)} notes ({len(chart) / duration_s:.2f}/s), "
-          f"lanes {LANE_NAMES[0]}={per_lane[0]} {LANE_NAMES[1]}={per_lane[1]}")
+    # Every melody note is charted, so this had better be an identity.
+    assert len(chart) == len(melody), (len(chart), len(melody))
+    same_lane = min((b[0] - a[0] for a, b in zip(chart, chart[1:]) if a[1] == b[1]),
+                    default=0)
+    tightest = min((b[0] - a[0] for a, b in zip(chart, chart[1:])), default=0)
+    print(f"chart:  {len(chart)} notes ({len(chart) / duration_s:.2f}/s) -- "
+          f"every melody note, 1:1")
+    print(f"        lanes {LANE_NAMES[0]}={per_lane[0]} {LANE_NAMES[1]}={per_lane[1]}, "
+          f"{forced} placed off-pitch to keep spacing")
+    print(f"        tightest gap {tightest}ms; tightest SAME-LANE gap {same_lane}ms "
+          f"(needs >= {SAME_LANE_MIN_MS}, i.e. RB_MISS_MS <= {same_lane // 2})")
+    if same_lane < SAME_LANE_MIN_MS:
+        raise ValueError(f"same-lane gap {same_lane}ms is under {SAME_LANE_MIN_MS}ms")
     print(f"music:  {len(chunks)} chunks, {note_count} SpeakerNotes, "
           f"~{note_count * 6} bytes of flash (was 911160 as PCM)")
     print(f"wrote {CHART_C}\n      {MUSIC_C}")
