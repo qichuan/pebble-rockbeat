@@ -1,0 +1,75 @@
+#pragma once
+
+// ---------------------------------------------------------------------------
+// Note-chart data and format.
+//
+// This file deliberately does NOT include <pebble.h>. chart.c and game.c are
+// the pure-logic half of the game, which is what lets tools/run_tests.sh build
+// them with the host compiler and unit-test the judgment maths without an
+// emulator. Keep it that way: the moment this needs a Pebble type, the tests
+// stop building.
+// ---------------------------------------------------------------------------
+
+#include <stdbool.h>
+#include <stdint.h>
+
+// Lane order is the load-bearing part of the whole design: it must match the
+// physical button order down the right edge of the watch.
+typedef enum {
+  RB_LANE_TOP = 0,  // UP button
+  RB_LANE_MID,      // SELECT button
+  RB_LANE_BOT,      // DOWN button
+  RB_LANE_COUNT,
+} RbLane;
+
+typedef enum {
+  RB_NOTE_NORMAL = 0,
+  RB_NOTE_BIG,
+  RB_NOTE_TYPE_COUNT,
+} RbNoteType;
+
+// 8 bytes with padding. The array is const and lives in ROM; per-note runtime
+// state is a parallel array owned by game.c.
+//
+// INVARIANT: notes MUST be sorted ascending by hit_time_ms. Both the render
+// cursor and the judging scan rely on it to avoid walking the whole chart
+// every frame.
+typedef struct {
+  uint32_t hit_time_ms;
+  uint8_t lane;  // RbLane
+  uint8_t type;  // RbNoteType
+} ChartNote;
+
+typedef struct {
+  const char *title;
+  const ChartNote *notes;
+  uint16_t note_count;
+  uint16_t bpm;
+  uint32_t lead_in_ms;  // elapsed time of the first bar's downbeat
+  uint32_t end_ms;      // elapsed time at which the results screen appears
+} Chart;
+
+// The compiled-in demo song. Never returns NULL.
+const Chart *chart_get_builtin(void);
+
+// Forward-compatible hook for loading a chart from a resource file instead of
+// having it compiled in. v1 always returns false and leaves out_chart
+// untouched, so callers fall back to chart_get_builtin().
+//
+// The intended on-disk layout, little-endian throughout:
+//
+//   off  size   field
+//   0    4      magic "RBCH"
+//   4    2      format version (currently 1)
+//   6    2      bpm
+//   8    4      lead_in_ms
+//   12   4      end_ms
+//   16   2      note_count
+//   18   2      reserved (0)
+//   20   32     title, NUL-padded
+//   52   6*n    notes: u32 hit_time_ms, u8 lane, u8 type
+//
+// Implementing this means adding a resource entry, reading it with
+// resource_load_byte_range(), and validating that hit_time_ms is ascending --
+// the rest of the game already treats the Chart as opaque data.
+bool chart_load_from_resource(uint32_t resource_id, Chart *out_chart);

@@ -1,0 +1,30 @@
+{
+  "name": "rockbeat",
+  "author": "Zhang Qichuan",
+  "version": "1.0.0",
+  "keywords": ["pebble-app", "game", "rhythm", "music", "taiko"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Rockbeat",
+    "uuid": "531f036c-c1bf-40df-bca3-ca07e786a66d",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "resources": {
+      "media": [
+        {
+          "menuIcon": true,
+          "type": "png",
+          "name": "IMAGE_MENU_ICON",
+          "file": "images/menu_icon.png"
+        }
+      ]
+    }
+  }
+}

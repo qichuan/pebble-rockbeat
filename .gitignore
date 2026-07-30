@@ -1,0 +1,7 @@
+# Pebble build output
+watch/build/
+watch/.lock-waf_darwin_build
+*.pbw
+
+# OS
+.DS_Store
