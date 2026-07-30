@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from make_chart import (  # noqa: E402  (path set above)
     MidiNote,
+    Song,
     extract_melody,
     make_tick_to_ms,
     parse_midi,
@@ -121,12 +122,15 @@ def main() -> None:
     division, tempos, notes, programs = parse_midi(source)
     tick_to_ms = make_tick_to_ms(tempos, division)
 
-    # The channel is chosen from the charted section -- that is the part of the
-    # song the game uses, so it is the part that should decide what "the melody"
-    # is -- but the notes are then taken from the WHOLE file, so the output is a
-    # general melody extraction rather than a 28-bar excerpt.
-    channel = pick_melody_channel(notes, programs, tick_to_ms)
+    # Channel choice and extraction both span the WHOLE file: this tool is a
+    # general melody extractor, and which bars the game happens to play is a
+    # separate decision that make_chart.py makes later. Picking the channel from
+    # a section would also be circular here -- the section is chosen by listening
+    # to the file this tool produces.
     last = max((n.end for n in notes), default=0)
+    bars = max(1, -(-(last + 1) // (384 * 4)))
+    whole = Song(source.stem, "whole", source, 0, bars)
+    channel = pick_melody_channel(notes, programs, tick_to_ms, whole)
     melody = extract_melody(notes, channel, 0, last + 1)
     if not melody:
         sys.exit(f"no melody found on channel {channel}")

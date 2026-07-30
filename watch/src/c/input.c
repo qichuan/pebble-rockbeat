@@ -16,7 +16,12 @@ static void prv_lane_down(ClickRecognizerRef recognizer, void *context) {
   (void)context;
 
   const ButtonId button = click_recognizer_get_button_id(recognizer);
-  const uint8_t lane = (button == BUTTON_ID_UP) ? RB_LANE_TOP : RB_LANE_MID;
+  uint8_t lane = RB_LANE_NONE;
+  if (button == BUTTON_ID_UP) {
+    lane = RB_LANE_TOP;
+  } else if (button == BUTTON_ID_SELECT) {
+    lane = RB_LANE_MID;
+  }
 
   if (s_handlers.on_lane_hit != NULL) {
     s_handlers.on_lane_hit(lane, press_now_ms);
@@ -45,9 +50,12 @@ void input_click_config_provider(void *context) {
   window_raw_click_subscribe(BUTTON_ID_UP, prv_lane_down, NULL, NULL);
   window_raw_click_subscribe(BUTTON_ID_SELECT, prv_lane_down, NULL, NULL);
 
-  // DOWN is deliberately left unsubscribed: two lanes means it is not a
-  // gameplay button. Leaving it dead is better than aliasing it onto a lane,
-  // which would break the "lane position matches button position" rule.
+  // DOWN is subscribed, but it is NOT a gameplay lane -- two lanes means there
+  // is no third band for it to point at, and aliasing it onto one would break
+  // the "lane position matches button position" rule the whole layout rests on.
+  // It reports RB_LANE_NONE, which the menu screens use to move the song
+  // selection and which the playing screen ignores outright.
+  window_raw_click_subscribe(BUTTON_ID_DOWN, prv_lane_down, NULL, NULL);
 
   // BACK must use single-click: pebble.h states the back button cannot take a
   // repeating, long or raw handler. That suits us -- BACK is never a gameplay

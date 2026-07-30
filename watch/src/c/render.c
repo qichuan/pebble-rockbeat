@@ -295,6 +295,20 @@ static void prv_draw_panel(GContext *ctx, GRect box) {
   graphics_context_set_stroke_width(ctx, 1);
 }
 
+// Which song the title screen is showing, derived from the chart that is loaded
+// rather than tracked separately. game_chart() is always one of the entries in
+// the chart table, so a pointer match IS the index -- and it cannot drift out of
+// step with the title being drawn the way a second copy of the index could.
+static uint8_t prv_selected_song(void) {
+  const Chart *const chart = game_chart();
+  for (uint8_t i = 0; i < chart_count(); i++) {
+    if (chart_get(i) == chart) {
+      return i;
+    }
+  }
+  return 0;
+}
+
 static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
   const int16_t w = lay->bounds.size.w;
 
@@ -307,30 +321,48 @@ static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
 
   prv_draw_panel(ctx, GRect(8, 30, w - 16, 168));
 
-  prv_draw_text(ctx, "ROCKBEAT", FONT_KEY_GOTHIC_28_BOLD, GRect(10, 38, w - 20, 34),
+  prv_draw_text(ctx, "ROCKBEAT", FONT_KEY_GOTHIC_28_BOLD, GRect(10, 36, w - 20, 32),
                 GTextAlignmentCenter, GColorYellow);
 
-  const Chart *const chart = game_chart();
-  if (chart != NULL) {
-    prv_draw_text(ctx, chart->title, FONT_KEY_GOTHIC_18, GRect(10, 74, w - 20, 24),
-                  GTextAlignmentCenter, GColorWhite);
+  // The song list. At most RB_TITLE_ROWS fit in the panel, so the list scrolls
+  // around the selection rather than running off the bottom once a third song is
+  // added -- the generator allows that without any change here.
+  const uint8_t count = chart_count();
+  const uint8_t selected = prv_selected_song();
+  const uint8_t visible = (count < RB_TITLE_ROWS) ? count : RB_TITLE_ROWS;
+  uint8_t first = 0;
+  if (count > visible) {
+    first = (selected >= visible) ? (uint8_t)(selected - visible + 1) : 0;
   }
 
+  for (uint8_t row = 0; row < visible; row++) {
+    const uint8_t index = (uint8_t)(first + row);
+    const Chart *const song = chart_get(index);
+    const int16_t y = (int16_t)(RB_TITLE_LIST_Y + row * RB_TITLE_ROW_H);
+    const bool is_selected = (index == selected);
+
+    if (is_selected) {
+      graphics_context_set_fill_color(ctx, GColorYellow);
+      graphics_fill_rect(ctx, GRect(12, y, w - 24, RB_TITLE_ROW_H - 2), 4, GCornersAll);
+    }
+    prv_draw_text(ctx, song->title, FONT_KEY_GOTHIC_14_BOLD,
+                  GRect(16, (int16_t)(y - 2), w - 32, RB_TITLE_ROW_H),
+                  GTextAlignmentCenter, is_selected ? GColorBlack : GColorLightGray);
+  }
+
+  const int16_t after_list = (int16_t)(RB_TITLE_LIST_Y + visible * RB_TITLE_ROW_H);
+
   char best[32];
-  snprintf(best, sizeof(best), "BEST %lu", (unsigned long)save_high_score());
-  prv_draw_text(ctx, best, FONT_KEY_GOTHIC_18_BOLD, GRect(10, 102, w - 20, 24),
+  snprintf(best, sizeof(best), "BEST %lu", (unsigned long)save_high_score(selected));
+  prv_draw_text(ctx, best, FONT_KEY_GOTHIC_18_BOLD,
+                GRect(10, (int16_t)(after_list + 4), w - 20, 24),
                 GTextAlignmentCenter, GColorLightGray);
 
-  char opts[40];
-  snprintf(opts, sizeof(opts), "SOUND %s   BUZZ %s",
-           audio_is_enabled() && audio_is_available() ? "ON" : "OFF",
-           feedback_haptics_enabled() ? "ON" : "OFF");
-  prv_draw_text(ctx, opts, FONT_KEY_GOTHIC_14, GRect(10, 132, w - 20, 20),
-                GTextAlignmentCenter, GColorLightGray);
-
-  prv_draw_text(ctx, "SELECT to play", FONT_KEY_GOTHIC_14_BOLD, GRect(10, 156, w - 20, 20),
+  prv_draw_text(ctx, "SELECT to play", FONT_KEY_GOTHIC_14_BOLD,
+                GRect(10, (int16_t)(after_list + 30), w - 20, 20),
                 GTextAlignmentCenter, GColorWhite);
-  prv_draw_text(ctx, "UP sound  DOWN buzz", FONT_KEY_GOTHIC_14, GRect(10, 174, w - 20, 20),
+  prv_draw_text(ctx, "UP / DOWN choose song", FONT_KEY_GOTHIC_14,
+                GRect(10, (int16_t)(after_list + 48), w - 20, 20),
                 GTextAlignmentCenter, GColorDarkGray);
 }
 
@@ -377,7 +409,7 @@ static void prv_draw_results(GContext *ctx, const RbLayout *lay) {
   prv_draw_text(ctx, buf, FONT_KEY_LECO_32_BOLD_NUMBERS, GRect(8, 54, w - 16, 38),
                 GTextAlignmentCenter, GColorWhite);
 
-  if (game_score() >= save_high_score() && game_score() > 0) {
+  if (game_score() >= save_high_score(prv_selected_song()) && game_score() > 0) {
     prv_draw_text(ctx, "NEW BEST", FONT_KEY_GOTHIC_14_BOLD, GRect(8, 92, w - 16, 20),
                   GTextAlignmentCenter, GColorYellow);
   }

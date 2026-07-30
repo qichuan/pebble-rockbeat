@@ -311,12 +311,29 @@
 // run. Version 1 installs trusted flag keys they had never written, and on
 // emery persist_exists() reports those as present -- so a v1 store can hold a
 // bogus "sound off". Re-initialising is the migration.
-#define RB_SAVE_VERSION 2
+// Bumped to 3 when bests became per song and the sound/haptics toggles were
+// removed. A v2 store holds a single shared score under a key that is now song
+// 0's, which would silently become song 0's best; re-initialising is the
+// migration, and it costs one high score once.
+#define RB_SAVE_VERSION 3
 #define RB_PERSIST_KEY_VERSION 1
-#define RB_PERSIST_KEY_HIGH_SCORE 2
-#define RB_PERSIST_KEY_BEST_COMBO 3
-#define RB_PERSIST_KEY_SOUND 4
-#define RB_PERSIST_KEY_HAPTICS 5
+
+// Per-song keys are allocated from these bases, so adding a song needs no new
+// constant. The two ranges must not overlap: keep them RB_MAX_SONGS apart.
+#define RB_PERSIST_KEY_HIGH_SCORE_BASE 16
+#define RB_PERSIST_KEY_BEST_COMBO_BASE 32
+
+// Upper bound on compiled-in songs, and the size of the saved-bests arrays.
+// chart_count() is the real number; this only has to be >= it, and it is
+// asserted against chart_count() at startup.
+#define RB_MAX_SONGS 8
+
+// Title screen song list. The panel between the header and the two hint lines
+// fits three rows; beyond that the list scrolls around the selection rather than
+// running off the bottom, so adding a fourth song needs no layout change.
+#define RB_TITLE_LIST_Y 74
+#define RB_TITLE_ROW_H 24
+#define RB_TITLE_ROWS 3
 
 // Results ranks, in accuracy percent.
 #define RB_RANK_S_PCT 95
@@ -339,6 +356,9 @@
 // Start the song immediately instead of showing the title, so the playing and
 // results screens are reachable without a button press.
 #define RB_DEBUG_AUTOSTART 0
+
+// Which song autostart plays, so a second song's chart can be captured too.
+#define RB_DEBUG_AUTOSTART_SONG 0
 
 #define RB_DEBUG_AUTOPLAY 0  // auto-hit every note as it reaches its hit time
 

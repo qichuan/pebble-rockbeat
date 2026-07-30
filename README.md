@@ -9,7 +9,7 @@ hit target beside the buttons; press that lane's button as a note arrives.
 ```
   TOP lane    ->  UP button       (blue)
   MIDDLE lane ->  SELECT button   (red)     <- screen centre, where SELECT is
-  DOWN        ->  unused          (two lanes, not three)
+  DOWN        ->  song select on the title screen; not a lane
   BACK        ->  exit            (never used for gameplay)
 ```
 
@@ -64,7 +64,7 @@ The judgment windows, scoring and combo logic are unit-tested on the host, with
 no emulator involved:
 
 ```bash
-./tools/run_tests.sh      # expect: OK: 2595 checks passed
+./tools/run_tests.sh      # expect: OK: 2886 checks passed
 ```
 
 This works because `game.c` and `chart.c` do not include `<pebble.h>` — they are
@@ -175,11 +175,12 @@ pebble-rockbeat/
       feedback.{c,h}      haptics policy + hit-flash state
       audio.{c,h}         drives the note sequencer; chains music chunks
       music.{c,h}         GENERATED SpeakerNote tables + the measured limits
-      save.{c,h}          high score and toggles; the only persist_* caller
+      save.{c,h}          per-song bests; the only persist_* caller
     resources/data/
-      melody.mid          the source of BOTH the chart and the music (not bundled)
-  tools/make_chart.py     regenerates chart.c AND music.c from the .mid
-  tools/extract_melody.py writes melody.mid from a full arrangement
+      melody.mid              song 1's melody -- chart AND music (not bundled)
+      you-are-not-alone.mid   song 2's melody (not bundled)
+  tools/make_chart.py     regenerates chart.c AND music.c for EVERY song
+  tools/extract_melody.py writes a melody .mid from a full arrangement
 ```
 
 ### Why the lanes are not half the screen each
@@ -200,18 +201,44 @@ SELECT is, and the bottom third is simply left dark.
 
 | Screen | UP | SELECT | DOWN | BACK |
 |---|---|---|---|---|
-| Title | toggle sound | start the song | toggle haptics | exit the app |
-| Playing | TOP lane | MIDDLE lane | (unused) | pause |
+| Title | previous song | play selected song | next song | exit the app |
+| Playing | TOP lane | MIDDLE lane | (ignored) | pause |
 | Paused | restart | resume | quit to title | quit to title |
 | Results | to title | to title | to title | to title |
 
-Sound and haptics settings persist, as do the high score and best combo.
+Sound and haptics are always on — the buttons that once toggled them now choose
+the song, and a rhythm game with the sound off is not the thing anyway.
 
-## The song: "Never Gonna Give You Up"
+**High score and best combo are stored per song.** A single shared best would be
+meaningless across songs of different length and density; one would permanently
+mask the other.
 
-The chart and the music are both generated from one MIDI file,
-`watch/resources/data/melody.mid`. Nothing is hand-placed and there is no audio
-recording anywhere in the project.
+DOWN is subscribed but is deliberately *not* a gameplay lane: with two lanes
+there is no third band for it to point at, and aliasing it onto one would break
+the rule that a lane sits at its button's vertical position. It reports a
+sentinel that the menus act on and the playfield ignores.
+
+## The songs
+
+Two songs, chosen with UP/DOWN on the title screen. Each is generated from one
+MIDI file — nothing is hand-placed, and there is no audio recording anywhere in
+the project.
+
+| | tempo | section | chart |
+|---|---|---|---|
+| **Never Gonna Give You Up** | 118 BPM | bars 12–40 | 157 notes, 2.76/s |
+| **You Are Not Alone** | 59 BPM | bars 58–72, the final chorus | 71 notes, 1.25/s |
+
+Both run ~57 seconds. The second is a ballad at half the tempo, so the same
+length comes from a quarter of the bars, and it plays far sparser.
+
+**Adding a song is a generator-only change.** `SONGS` in `tools/make_chart.py`
+holds the title, the melody `.mid`, and the section; `chart_count()` drives the
+selector, `save.c` allocates its persist keys from a base, and the title list
+scrolls. No C file needs editing. The section — *which* bars — is the one thing
+that cannot be derived: which fourteen bars are the chorus is a musical
+judgement, and getting it wrong yields a technically valid chart of the wrong
+part of the song.
 
 **56.9 seconds, 118 BPM, 157 notes (2.76/s) — every melody note.** A bar-aligned 28-bar section
 starting at bar 12, which skips the count-in and begins on a downbeat.
@@ -282,19 +309,23 @@ flat one, which is the honest answer — a flat part has no accents.
 ### Regenerating
 
 ```bash
-python3 tools/make_chart.py                     # uses melody.mid
-python3 tools/make_chart.py path/to/song.mid    # any 384-tick/beat format 0/1 SMF
+python3 tools/make_chart.py     # regenerates chart.c and music.c for EVERY song
 ```
 
-The input is `watch/resources/data/melody.mid` — the extracted melody, 4,755
-bytes, format 0, channel 0, 538 notes. It is a build input only; it is not in
-`package.json`'s `media[]`, so it does not ship.
+It reads every entry in `SONGS` and rewrites both generated files in one pass, so
+the two can never describe different sets of songs. The inputs are melody-only
+MIDIs in `watch/resources/data/` — build inputs only, not in `package.json`'s
+`media[]`, so they do not ship.
 
-To re-derive it from a full arrangement:
+To add a song: extract its melody, add a `Song` entry, regenerate.
 
 ```bash
-python3 tools/extract_melody.py path/to/arrangement.mid
+python3 tools/extract_melody.py path/to/arrangement.mid watch/resources/data/new.mid
 ```
+
+Any 384-tick/beat format 0/1 SMF works. The generator will refuse the song rather
+than emit an unplayable chart if two notes cannot be placed a judgment window
+apart in either lane — see the spacing rule above.
 
 **Which input you use makes no audible difference.** `make_chart.py` runs the
 same extraction internally and it is idempotent on an already-extracted line, so

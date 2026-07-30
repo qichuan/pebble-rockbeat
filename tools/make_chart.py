@@ -39,23 +39,58 @@ import struct
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-# The melody-only file written by tools/extract_melody.py, which is now what
-# lives in the repo. Feeding the full arrangement here instead still works and
-# still produces byte-identical output -- the extraction below is idempotent on
-# an already-extracted line -- but the melody file is the one that can be
-# auditioned, so it is the one that is kept.
-DEFAULT_MIDI = ROOT / "watch/resources/data/melody.mid"
+DATA = ROOT / "watch/resources/data"
 CHART_C = ROOT / "watch/src/c/chart.c"
 MUSIC_C = ROOT / "watch/src/c/music.c"
 
 TICKS_PER_BEAT_REQUIRED = 384
-START_BAR = 12                 # Skip the count-in and begin on a downbeat.
-BARS = 28                      # ~57 seconds at this section's 118 BPM.
 BEATS_PER_BAR = 4
-START_TICK = START_BAR * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
-END_TICK = START_TICK + BARS * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
 LEAD_MS = 2000
 TAIL_MS = 2500
+
+
+@dataclass(frozen=True)
+class Song:
+    """One playable song: which MIDI, and which bars of it.
+
+    The section is per song and hand-picked. It is the one thing here that
+    cannot be derived: which 14 bars are the chorus is a musical judgement, and
+    picking the wrong ones produces a technically valid chart of the wrong part
+    of the song.
+
+    `midi` is a melody-only file written by tools/extract_melody.py. Feeding the
+    full arrangement instead produces byte-identical output -- the extraction
+    below is idempotent on an already-extracted line -- but the melody file is
+    the one that can be auditioned, so it is the one that is kept.
+    """
+    title: str          # shown on the title screen; keep it short enough to fit
+    ident: str          # C identifier stem
+    midi: Path
+    start_bar: int
+    bars: int
+
+    @property
+    def start_tick(self) -> int:
+        return self.start_bar * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+
+    @property
+    def end_tick(self) -> int:
+        return self.start_tick + self.bars * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+
+
+SONGS = (
+    # 118 BPM. Bar 12 skips the count-in and begins on a downbeat; 28 bars is
+    # ~57s. The melody is on an exact sixteenth grid, which is what lets every
+    # note be charted -- see build_chart().
+    Song("Never Gonna Give You Up", "ngg", DATA / "melody.mid", 12, 28),
+    # 59 BPM, so a bar is 4.1s and 14 bars is ~57s -- the same length as above
+    # from a quarter of the bars. The last 14 bars are the final chorus, and the
+    # section ends where the song does rather than being cut mid-phrase.
+    Song("You Are Not Alone", "yana", DATA / "you-are-not-alone.mid", 58, 14),
+)
+
+# tools/extract_melody.py defaults to re-deriving the first song's melody file.
+DEFAULT_MIDI = SONGS[0].midi
 
 # ---------------------------------------------------------------------------
 # The chart is EVERY melody note. One note heard, one note to hit.
@@ -119,15 +154,41 @@ TRACKS = 4                      # SPEAKER_MAX_TRACKS
 MAX_NOTES_PER_TRACK = 256       # SPEAKER_MAX_NOTES -- exceeding this FAULTS
 MAX_NOTE_MS = 10000             # SDK cap on a single note's duration_ms
 
-# ~16.3s at 118 BPM, and ~120-170 notes per chunk against the 256 cap.
+# Chunks are bounded in MILLISECONDS, not bars.
 #
-# Raised from 4 bars because every chunk boundary is a speaker handover, and a
-# handover is neither free nor entirely safe: it is serviced on the app task one
-# frame after the sequencer reports finishing, so it costs a short gap, and it
-# restarts the driver. Halving the number of them (7 chunks -> 4) halves both.
-# Do not raise this much further without checking the note counts printed by
-# this script against MAX_NOTES_PER_TRACK -- going over does not fail, it FAULTS.
-CHUNK_BARS = 8
+# Bars were the unit until a second song arrived at half the tempo, where 8 bars
+# is 32.5s rather than 16.3s -- and a chunk that long never reported finishing at
+# all. The music stopped after the first chunk, with no error and nothing in the
+# log, because the finish callback that drives the handover never came. Note
+# count was not the difference: the chunk that failed held 123 notes, and one
+# that works holds 159.
+#
+# So the ceiling is expressed in the unit the limit actually lives in. Bars are
+# still the split points -- a boundary should fall on a downbeat, where a
+# handover gap is least audible -- but bars are accumulated until adding another
+# would cross this.
+#
+# What is firmly established: a 32.5s chunk NEVER reports finishing. Reproduced
+# every run, and it takes the rest of the song with it, because the handover is
+# driven by that callback. 16.3s chunks always complete.
+#
+# What is NOT established is anything finer. Boundary error at 16.3s measured
+# +33/+17/+10ms on one run and +4/-189/+320ms on another with identical inputs,
+# so the emulator's own variance is larger than any difference between 16s and
+# 18s. Do not read a trend into those numbers, and do not tune this against
+# them; the watch is the only place a real figure could come from.
+#
+# 16500 therefore buys margin, not precision. It admits exactly the 16.27s chunk
+# that always works at both tempos -- 8 bars at 118 BPM and 4 bars at 59 BPM are
+# both 16271ms -- and excludes the next bar up at either. Boundaries are not
+# free (each is a handover costing a frame's gap and a driver restart), so the
+# pressure is towards longer; this resists it until there is a measurement worth
+# trusting.
+CHUNK_MAX_MS = 16500
+
+# Independently of duration: going over MAX_NOTES_PER_TRACK does not fail, it
+# FAULTS the app, so the chunker respects this too.
+CHUNK_MAX_NOTES = 200
 
 WAVE_SINE, WAVE_SQUARE, WAVE_TRIANGLE, WAVE_SAWTOOTH = 0, 1, 2, 3
 
@@ -313,7 +374,8 @@ NON_MELODY_PROGRAMS = set(range(32, 40)) | set(range(88, 96))   # basses, pads
 MELODY_MIN_RATE = 1.0
 
 
-def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to_ms) -> int:
+def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to_ms,
+                        song: Song) -> int:
     """Score each channel on how much it behaves like a lead line.
 
     Density is a HARD filter, not a scoring term. Scoring it alongside pitch
@@ -323,7 +385,8 @@ def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to
     enough notes to BE the melody, so anything under MELODY_MIN_RATE is not a
     candidate at all; only then does pitch-versus-polyphony decide.
     """
-    section = [n for n in notes if START_TICK <= n.start < END_TICK and n.channel != 9]
+    section = [n for n in notes
+               if song.start_tick <= n.start < song.end_tick and n.channel != 9]
     best, best_score = None, None
     for channel in sorted({n.channel for n in section}):
         group = [n for n in section if n.channel == channel]
@@ -338,7 +401,7 @@ def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to
         for _tick, delta in events:
             depth += delta
             peak = max(peak, depth)
-        span_ms = tick_to_ms(END_TICK) - tick_to_ms(START_TICK)
+        span_ms = tick_to_ms(song.end_tick) - tick_to_ms(song.start_tick)
         if len(group) / (span_ms / 1000.0) < MELODY_MIN_RATE:
             continue
         pitches = sorted(n.pitch for n in group)
@@ -354,20 +417,18 @@ def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to
 
 
 def extract_melody(notes: list[MidiNote], channel: int,
-                   start_tick: int | None = None,
-                   end_tick: int | None = None) -> list[MidiNote]:
+                   start_tick: int, end_tick: int) -> list[MidiNote]:
     """Skyline within the chosen channel, forced monophonic.
 
     Where notes overlap, the higher one wins and the lower is dropped rather
     than shortened -- a melody that ducks to an inner voice for 40ms reads as a
     glitch, not as counterpoint.
 
-    The tick range defaults to the charted section, which is what make_chart
-    wants. tools/extract_melody.py passes the whole file instead, so the melody
-    MIDI it writes is a general extraction rather than a 28-bar excerpt.
+    The tick range is always explicit: make_chart passes the song's charted
+    section, tools/extract_melody.py passes the whole file so the melody MIDI it
+    writes is a general extraction rather than an excerpt.
     """
-    lo = START_TICK if start_tick is None else start_tick
-    hi = END_TICK if end_tick is None else end_tick
+    lo, hi = start_tick, end_tick
     group = sorted((n for n in notes
                     if n.channel == channel and lo <= n.start < hi),
                    key=lambda n: (n.start, -n.pitch))
@@ -400,7 +461,7 @@ def melody_octave_shift(melody: list[MidiNote]) -> int:
     return shift
 
 
-def build_chart(melody: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]]:
+def build_chart(melody: list[MidiNote], tick_to_ms, song: Song):
     """One chart note per melody note. Every note. No selection, no dropping.
 
     The chart and the music come from the same list, so a note heard is always a
@@ -420,7 +481,7 @@ def build_chart(melody: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]
     That is what guarantees SAME_LANE_MIN_MS across the whole chart, and with it
     the invariant the unit tests check.
     """
-    origin = tick_to_ms(START_TICK)
+    origin = tick_to_ms(song.start_tick)
     pitches = sorted(n.pitch for n in melody)
     split = pitches[len(pitches) // 2]
 
@@ -443,7 +504,7 @@ def build_chart(melody: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]
     forced = 0
     for note in melody:
         time_ms = LEAD_MS + int(round(tick_to_ms(note.start) - origin))
-        offset = note.start - START_TICK
+        offset = note.start - song.start_tick
         held = tick_to_ms(note.end) - tick_to_ms(note.start)
         big = int(offset % (TICKS_PER_BEAT_REQUIRED * BEATS_PER_BAR) == 0
                   or note.velocity >= accent_velocity
@@ -476,7 +537,7 @@ def build_chart(melody: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]
     return chart, forced
 
 
-def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
+def build_music(melody: list[MidiNote], shift: int, tick_to_ms, song: Song):
     """One monophonic melody track, split into chunks.
 
     Chunks exist for two reasons. The hard one is SPEAKER_MAX_NOTES: a track may
@@ -484,9 +545,9 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
     useful one is that chaining chunks from the finish callback is the only place
     the music can be re-anchored to the game clock.
     """
-    origin = tick_to_ms(START_TICK)
-    total_ms = int(round(tick_to_ms(END_TICK) - origin))
-    chunk_ticks = CHUNK_BARS * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+    origin = tick_to_ms(song.start_tick)
+    total_ms = int(round(tick_to_ms(song.end_tick) - origin))
+    bar_ticks = BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
 
     placed: list[tuple[int, int, int, int]] = []
     for note in melody:
@@ -501,10 +562,17 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
                 placed[-1] = (placed[-1][0], end_prev, placed[-1][2], placed[-1][3])
         placed.append((start_ms, end_ms, note.pitch + shift, note.velocity))
 
+    # Accumulate whole bars into a chunk until one more would cross CHUNK_MAX_MS.
+    # Splitting on a bar keeps every handover on a downbeat.
     bounds = []
-    tick = START_TICK
-    while tick < END_TICK:
-        nxt = min(tick + chunk_ticks, END_TICK)
+    tick = song.start_tick
+    while tick < song.end_tick:
+        nxt = min(tick + bar_ticks, song.end_tick)
+        while nxt < song.end_tick:
+            after = min(nxt + bar_ticks, song.end_tick)
+            if tick_to_ms(after) - tick_to_ms(tick) > CHUNK_MAX_MS:
+                break
+            nxt = after
         bounds.append((int(round(tick_to_ms(tick) - origin)),
                        int(round(tick_to_ms(nxt) - origin))))
         tick = nxt
@@ -544,142 +612,198 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
             cursor = end_ms
         if cursor < chunk_end:
             append_rest(seq, chunk_end - cursor)
-        if len(seq) > MAX_NOTES_PER_TRACK:
-            raise ValueError(f"chunk needs {len(seq)} notes, over the "
-                             f"{MAX_NOTES_PER_TRACK} cap -- lower CHUNK_BARS")
+        if len(seq) > CHUNK_MAX_NOTES:
+            raise ValueError(f"chunk needs {len(seq)} notes, over the working "
+                             f"limit of {CHUNK_MAX_NOTES} (hard cap "
+                             f"{MAX_NOTES_PER_TRACK}) -- lower CHUNK_MAX_MS")
         chunks.append((chunk_start, chunk_end - chunk_start, [seq]))
 
     return chunks, total_ms
 
 
-def write_music(chunks, total_ms: int) -> int:
+def write_music(built) -> int:
+    """Emit every song's chunks, plus a per-song index.
+
+    `built` is a list of (song, chunks, total_ms). Arrays are named by the song's
+    C identifier stem rather than by index, so adding or reordering a song does
+    not silently renumber the previous one's symbols.
+    """
     parts = ['#include "music.h"\n',
              "// GENERATED FILE -- do not hand-edit. Regenerate with tools/make_chart.py.\n"
              "//\n"
-             "// A single monophonic melody line for speaker_play_tracks(). See music.h for\n"
-             "// the measured sequencer limits, and audio.c for the chunk chaining.\n"]
+             "// One monophonic melody line per song, for speaker_play_tracks(). See music.h\n"
+             "// for the measured sequencer limits, and audio.c for the chunk handover.\n"]
 
     total_notes = 0
-    for chunk_index, (_start, _duration, tracks) in enumerate(chunks):
-        for track_index, seq in enumerate(tracks):
-            total_notes += len(seq)
-            body = "\n".join(f"  {{ {note:3d}, {wave}, {ms:5d}, {vel:3d}, 0 }},"
-                              for note, wave, ms, vel in seq)
-            parts.append(f"static const SpeakerNote s_c{chunk_index}_t{track_index}[] = {{\n"
-                         f"{body}\n}};\n")
+    for song, chunks, _total_ms in built:
+        for chunk_index, (_start, _duration, tracks) in enumerate(chunks):
+            for track_index, seq in enumerate(tracks):
+                total_notes += len(seq)
+                body = "\n".join(f"  {{ {note:3d}, {wave}, {ms:5d}, {vel:3d}, 0 }},"
+                                  for note, wave, ms, vel in seq)
+                parts.append(
+                    f"static const SpeakerNote s_{song.ident}_c{chunk_index}_t{track_index}[] "
+                    f"= {{\n{body}\n}};\n")
 
-    entries = []
-    for chunk_index, (start, duration, tracks) in enumerate(chunks):
-        names = ", ".join(f"s_c{chunk_index}_t{t}" for t in range(len(tracks)))
-        counts = ", ".join(str(len(seq)) for seq in tracks)
-        entries.append(f"  {{ {{ {names} }}, {{ {counts} }}, {len(tracks)}, {start}, {duration} }},")
-    parts.append("static const MusicChunk s_chunks[] = {\n" + "\n".join(entries) + "\n};\n")
+    for song, chunks, _total_ms in built:
+        entries = []
+        for chunk_index, (start, duration, tracks) in enumerate(chunks):
+            names = ", ".join(f"s_{song.ident}_c{chunk_index}_t{t}"
+                              for t in range(len(tracks)))
+            counts = ", ".join(str(len(seq)) for seq in tracks)
+            entries.append(f"  {{ {{ {names} }}, {{ {counts} }}, "
+                           f"{len(tracks)}, {start}, {duration} }},")
+        parts.append(f"static const MusicChunk s_{song.ident}_chunks[] = {{\n"
+                     + "\n".join(entries) + "\n};\n")
 
-    parts.append(f"""uint16_t music_chunk_count(void) {{
-  return (uint16_t)(sizeof(s_chunks) / sizeof(s_chunks[0]));
-}}
+    rows = "\n".join(
+        f"  {{ s_{song.ident}_chunks, "
+        f"(uint16_t)(sizeof(s_{song.ident}_chunks) / sizeof(s_{song.ident}_chunks[0])), "
+        f"{total_ms} }},"
+        for song, _chunks, total_ms in built)
+    parts.append("static const MusicSong s_songs[] = {\n" + rows + "\n};\n")
 
-const MusicChunk *music_chunk(uint16_t index) {{
-  return (index < music_chunk_count()) ? &s_chunks[index] : NULL;
-}}
+    parts.append("""static const MusicSong *prv_song(uint8_t song) {
+  return (song < (sizeof(s_songs) / sizeof(s_songs[0]))) ? &s_songs[song] : NULL;
+}
 
-uint32_t music_total_ms(void) {{ return {total_ms}; }}
+uint16_t music_chunk_count(uint8_t song) {
+  const MusicSong *const s = prv_song(song);
+  return (s != NULL) ? s->chunk_count : 0;
+}
+
+const MusicChunk *music_chunk(uint8_t song, uint16_t index) {
+  const MusicSong *const s = prv_song(song);
+  return (s != NULL && index < s->chunk_count) ? &s->chunks[index] : NULL;
+}
+
+uint32_t music_total_ms(uint8_t song) {
+  const MusicSong *const s = prv_song(song);
+  return (s != NULL) ? s->total_ms : 0;
+}
 """)
     MUSIC_C.write_text("\n".join(parts))
     return total_notes
 
 
-def write_chart(chart: list[tuple[int, int, int]], duration_s: float, tick_to_ms) -> None:
+def write_chart(built) -> None:
+    """Emit every song's note array, plus the table the app indexes by song."""
+    parts = ['#include "chart.h"\n',
+             "// GENERATED FILE -- do not hand-edit. Regenerate with tools/make_chart.py.\n"
+             "//\n"
+             "// Charted directly from MIDI note-on events and tempo messages. The chart is\n"
+             "// EVERY melody note, 1:1 -- a note heard is a note to hit. Lane follows pitch\n"
+             "// except where spacing forces the other lane; see tools/make_chart.py.\n"
+             "//\n"
+             "// The same MIDI and the same tempo map generate music.c, so the notes and the\n"
+             "// music share one origin and cannot drift apart.\n"]
+
+    for song, chart, duration_s, bpm in built:
+        rows = "\n".join(
+            f"  {{ {time_ms:6d}, {LANE_NAMES[lane]:12s}, "
+            f"{'RB_NOTE_BIG   ' if big else 'RB_NOTE_NORMAL'} }},"
+            for time_ms, lane, big in chart)
+        parts.append(f"// {song.title}: {len(chart)} notes, "
+                     f"{len(chart) / duration_s:.2f}/s, {duration_s:.1f}s at {bpm} BPM.\n"
+                     f"static const ChartNote s_{song.ident}_notes[] = {{\n{rows}\n}};\n")
+
     rows = "\n".join(
-        f"  {{ {time_ms:6d}, {LANE_NAMES[lane]:12s}, "
-        f"{'RB_NOTE_BIG   ' if big else 'RB_NOTE_NORMAL'} }},"
-        for time_ms, lane, big in chart)
-    bpm = round(60000 / (tick_to_ms(START_TICK + TICKS_PER_BEAT_REQUIRED)
-                         - tick_to_ms(START_TICK)))
-    end_ms = LEAD_MS + int(round(duration_s * 1000)) + TAIL_MS
-    CHART_C.write_text(f'''#include "chart.h"
+        f'  {{ .title = "{song.title}", .notes = s_{song.ident}_notes,\n'
+        f"    .note_count = (uint16_t)(sizeof(s_{song.ident}_notes) "
+        f"/ sizeof(s_{song.ident}_notes[0])),\n"
+        f"    .bpm = {bpm}, .lead_in_ms = {LEAD_MS}, "
+        f".end_ms = {LEAD_MS + int(round(duration_s * 1000)) + TAIL_MS} }},"
+        for song, chart, duration_s, bpm in built)
+    parts.append("static const Chart s_charts[] = {\n" + rows + "\n};\n")
 
-// GENERATED FILE -- do not hand-edit. Regenerate with tools/make_chart.py.
-//
-// "Never Gonna Give You Up" is charted directly from MIDI note-on events and
-// tempo messages. Two lanes: drum membranes (kick, snare, toms) on MIDDLE,
-// metal (hats, cymbals) on TOP. A MIDI sixteenth collects simultaneous layers,
-// then spacing rules retain a playable rhythm. The same MIDI source generates
-// music.c, so the notes and the music share one tempo map and cannot drift.
-//
-// {len(chart)} notes, {len(chart) / duration_s:.2f}/s; {duration_s:.1f}s.
+    parts.append("""uint8_t chart_count(void) {
+  return (uint8_t)(sizeof(s_charts) / sizeof(s_charts[0]));
+}
 
-static const ChartNote s_demo_notes[] = {{
-{rows}
-}};
+const Chart *chart_get(uint8_t index) {
+  return (index < chart_count()) ? &s_charts[index] : &s_charts[0];
+}
 
-static const Chart s_demo_chart = {{
-  .title = "Never Gonna Give You Up",
-  .notes = s_demo_notes,
-  .note_count = (uint16_t)(sizeof(s_demo_notes) / sizeof(s_demo_notes[0])),
-  .bpm = {bpm},
-  .lead_in_ms = {LEAD_MS},
-  .end_ms = {end_ms},
-}};
-
-const Chart *chart_get_builtin(void) {{ return &s_demo_chart; }}
-
-bool chart_load_from_resource(uint32_t resource_id, Chart *out_chart) {{
+bool chart_load_from_resource(uint32_t resource_id, Chart *out_chart) {
   (void)resource_id;
   (void)out_chart;
   return false;
-}}
-''')
+}
+""")
+    CHART_C.write_text("\n".join(parts))
 
 
-def main() -> None:
-    if len(sys.argv) > 2:
-        sys.exit(__doc__)
-    midi = Path(sys.argv[1]) if len(sys.argv) == 2 else DEFAULT_MIDI
-    ticks_per_beat, tempos, notes, programs = parse_midi(midi)
+def build_song(song: Song):
+    """Everything for one song: melody, chart, music, and a printed report."""
+    ticks_per_beat, tempos, notes, programs = parse_midi(song.midi)
     tick_to_ms = make_tick_to_ms(tempos, ticks_per_beat)
 
-    channel = pick_melody_channel(notes, programs, tick_to_ms)
-    melody = extract_melody(notes, channel)
+    channel = pick_melody_channel(notes, programs, tick_to_ms, song)
+    melody = extract_melody(notes, channel, song.start_tick, song.end_tick)
     shift = melody_octave_shift(melody)
 
-    chart, forced = build_chart(melody, tick_to_ms)
-    chunks, total_ms = build_music(melody, shift, tick_to_ms)
+    chart, forced = build_chart(melody, tick_to_ms, song)
+    chunks, total_ms = build_music(melody, shift, tick_to_ms, song)
 
     # duration_ms is uint16 and the SDK caps a single note at 10000ms. Long rests
     # are split to stay under it, so this asserts that splitting actually worked
     # rather than assuming it -- checking the emitted entries, not the chunk.
     longest = max(ms for _s, _d, tracks in chunks for seq in tracks for _p, _w, ms, _v in seq)
     if longest > MAX_NOTE_MS:
-        raise ValueError(f"emitted a {longest}ms entry, over the {MAX_NOTE_MS}ms note cap")
+        raise ValueError(f"{song.title}: emitted a {longest}ms entry, over the "
+                         f"{MAX_NOTE_MS}ms note cap")
 
     duration_s = total_ms / 1000.0
-    note_count = write_music(chunks, total_ms)
-    write_chart(chart, duration_s, tick_to_ms)
+    bpm = round(60000 / (tick_to_ms(song.start_tick + TICKS_PER_BEAT_REQUIRED)
+                         - tick_to_ms(song.start_tick)))
 
-    per_lane = Counter(lane for _t, lane, _b in chart)
-    pitches = [n.pitch + shift for n in melody]
-    lo = 440 * 2 ** ((min(pitches) - 69) / 12)
-    hi = 440 * 2 ** ((max(pitches) - 69) / 12)
-    print(f"{midi.name}: {len(notes)} MIDI notes in file, {duration_s:.1f}s section")
-    print(f"melody: channel {channel} (GM program {programs.get(channel)}), "
-          f"{len(melody)} notes, transposed +{shift // 12} octave(s) "
-          f"-> {lo:.0f}-{hi:.0f}Hz")
     # Every melody note is charted, so this had better be an identity.
     assert len(chart) == len(melody), (len(chart), len(melody))
     same_lane = min((b[0] - a[0] for a, b in zip(chart, chart[1:]) if a[1] == b[1]),
                     default=0)
     tightest = min((b[0] - a[0] for a, b in zip(chart, chart[1:])), default=0)
-    print(f"chart:  {len(chart)} notes ({len(chart) / duration_s:.2f}/s) -- "
-          f"every melody note, 1:1")
-    print(f"        lanes {LANE_NAMES[0]}={per_lane[0]} {LANE_NAMES[1]}={per_lane[1]}, "
-          f"{forced} placed off-pitch to keep spacing")
-    print(f"        tightest gap {tightest}ms; tightest SAME-LANE gap {same_lane}ms "
-          f"(needs >= {SAME_LANE_MIN_MS}, i.e. RB_MISS_MS <= {same_lane // 2})")
     if same_lane < SAME_LANE_MIN_MS:
-        raise ValueError(f"same-lane gap {same_lane}ms is under {SAME_LANE_MIN_MS}ms")
-    print(f"music:  {len(chunks)} chunks, {note_count} SpeakerNotes, "
-          f"~{note_count * 6} bytes of flash (was 911160 as PCM)")
+        raise ValueError(f"{song.title}: same-lane gap {same_lane}ms is under "
+                         f"{SAME_LANE_MIN_MS}ms -- windows would overlap")
+
+    per_lane = Counter(lane for _t, lane, _b in chart)
+    pitches = [n.pitch + shift for n in melody]
+    lo = 440 * 2 ** ((min(pitches) - 69) / 12)
+    hi = 440 * 2 ** ((max(pitches) - 69) / 12)
+    notes_per_chunk = max(len(seq) for _s, _d, tracks in chunks for seq in tracks)
+
+    print(f"\n{song.title}  [{song.midi.name}, bars {song.start_bar}-"
+          f"{song.start_bar + song.bars}, {bpm} BPM, {duration_s:.1f}s]")
+    print(f"  melody: channel {channel} (GM program {programs.get(channel)}), "
+          f"{len(melody)} notes, +{shift // 12} octave(s) -> {lo:.0f}-{hi:.0f}Hz")
+    print(f"  chart:  {len(chart)} notes ({len(chart) / duration_s:.2f}/s) -- "
+          f"every melody note, 1:1")
+    print(f"          lanes {LANE_NAMES[0]}={per_lane[0]} {LANE_NAMES[1]}={per_lane[1]}, "
+          f"{forced} placed off-pitch to keep spacing")
+    print(f"          tightest gap {tightest}ms; tightest SAME-LANE gap {same_lane}ms "
+          f"(needs >= {SAME_LANE_MIN_MS}, i.e. RB_MISS_MS <= {same_lane // 2})")
+    print(f"  music:  {len(chunks)} chunks, up to {notes_per_chunk} notes each "
+          f"(cap {MAX_NOTES_PER_TRACK})")
+
+    return (song, chart, duration_s, bpm), (song, chunks, total_ms), len(chart)
+
+
+def main() -> None:
+    if len(sys.argv) > 1:
+        sys.exit(__doc__)
+
+    charts, musics, total_chart_notes = [], [], 0
+    for song in SONGS:
+        chart_part, music_part, n = build_song(song)
+        charts.append(chart_part)
+        musics.append(music_part)
+        total_chart_notes += n
+
+    note_count = write_music(musics)
+    write_chart(charts)
+
+    print(f"\n{len(SONGS)} songs: {total_chart_notes} chart notes, "
+          f"{note_count} SpeakerNotes (~{note_count * 6} bytes of flash)")
     print(f"wrote {CHART_C}\n      {MUSIC_C}")
 
 

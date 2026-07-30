@@ -2,15 +2,15 @@
 
 // GENERATED FILE -- do not hand-edit. Regenerate with tools/make_chart.py.
 //
-// "Never Gonna Give You Up" is charted directly from MIDI note-on events and
-// tempo messages. Two lanes: drum membranes (kick, snare, toms) on MIDDLE,
-// metal (hats, cymbals) on TOP. A MIDI sixteenth collects simultaneous layers,
-// then spacing rules retain a playable rhythm. The same MIDI source generates
-// music.c, so the notes and the music share one tempo map and cannot drift.
+// Charted directly from MIDI note-on events and tempo messages. The chart is
+// EVERY melody note, 1:1 -- a note heard is a note to hit. Lane follows pitch
+// except where spacing forces the other lane; see tools/make_chart.py.
 //
-// 157 notes, 2.76/s; 56.9s.
+// The same MIDI and the same tempo map generate music.c, so the notes and the
+// music share one origin and cannot drift apart.
 
-static const ChartNote s_demo_notes[] = {
+// Never Gonna Give You Up: 157 notes, 2.76/s, 56.9s at 118 BPM.
+static const ChartNote s_ngg_notes[] = {
   {   2254, RB_LANE_TOP , RB_NOTE_NORMAL },
   {   2508, RB_LANE_MID , RB_NOTE_NORMAL },
   {   2763, RB_LANE_TOP , RB_NOTE_NORMAL },
@@ -170,16 +170,97 @@ static const ChartNote s_demo_notes[] = {
   {  58693, RB_LANE_TOP , RB_NOTE_NORMAL },
 };
 
-static const Chart s_demo_chart = {
-  .title = "Never Gonna Give You Up",
-  .notes = s_demo_notes,
-  .note_count = (uint16_t)(sizeof(s_demo_notes) / sizeof(s_demo_notes[0])),
-  .bpm = 118,
-  .lead_in_ms = 2000,
-  .end_ms = 61448,
+// You Are Not Alone: 71 notes, 1.25/s, 56.9s at 59 BPM.
+static const ChartNote s_yana_notes[] = {
+  {   3992, RB_LANE_TOP , RB_NOTE_BIG    },
+  {   4500, RB_LANE_MID , RB_NOTE_BIG    },
+  {   4754, RB_LANE_MID , RB_NOTE_BIG    },
+  {   5559, RB_LANE_MID , RB_NOTE_BIG    },
+  {   5824, RB_LANE_MID , RB_NOTE_BIG    },
+  {   8102, RB_LANE_TOP , RB_NOTE_BIG    },
+  {   8870, RB_LANE_TOP , RB_NOTE_BIG    },
+  {   9373, RB_LANE_MID , RB_NOTE_BIG    },
+  {   9860, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  12169, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  12662, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  12943, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  13451, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  13949, RB_LANE_MID , RB_NOTE_BIG    },
+  {  15983, RB_LANE_MID , RB_NOTE_BIG    },
+  {  16211, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  16709, RB_LANE_MID , RB_NOTE_BIG    },
+  {  16963, RB_LANE_MID , RB_NOTE_BIG    },
+  {  17752, RB_LANE_MID , RB_NOTE_BIG    },
+  {  18017, RB_LANE_MID , RB_NOTE_BIG    },
+  {  20284, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  20792, RB_LANE_MID , RB_NOTE_BIG    },
+  {  21068, RB_LANE_MID , RB_NOTE_BIG    },
+  {  21576, RB_LANE_MID , RB_NOTE_BIG    },
+  {  22085, RB_LANE_MID , RB_NOTE_BIG    },
+  {  22614, RB_LANE_MID , RB_NOTE_BIG    },
+  {  24351, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  25114, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  25628, RB_LANE_MID , RB_NOTE_BIG    },
+  {  26142, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  28430, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  28933, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  29214, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  29733, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  30236, RB_LANE_MID , RB_NOTE_BIG    },
+  {  32254, RB_LANE_MID , RB_NOTE_NORMAL },
+  {  32482, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  32980, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  33234, RB_LANE_MID , RB_NOTE_BIG    },
+  {  34023, RB_LANE_MID , RB_NOTE_NORMAL },
+  {  34288, RB_LANE_MID , RB_NOTE_BIG    },
+  {  36534, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  37042, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  37296, RB_LANE_MID , RB_NOTE_BIG    },
+  {  38101, RB_LANE_MID , RB_NOTE_NORMAL },
+  {  38366, RB_LANE_MID , RB_NOTE_BIG    },
+  {  40644, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  41157, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  41412, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  42402, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  44711, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  45204, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  45485, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  45993, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  46491, RB_LANE_TOP , RB_NOTE_BIG    },
+  {  48525, RB_LANE_MID , RB_NOTE_NORMAL },
+  {  48753, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  49251, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  49505, RB_LANE_MID , RB_NOTE_BIG    },
+  {  50294, RB_LANE_MID , RB_NOTE_NORMAL },
+  {  50559, RB_LANE_MID , RB_NOTE_BIG    },
+  {  52826, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  53334, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  53610, RB_LANE_MID , RB_NOTE_NORMAL },
+  {  54118, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  54627, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  55156, RB_LANE_MID , RB_NOTE_BIG    },
+  {  56894, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  57656, RB_LANE_TOP , RB_NOTE_NORMAL },
+  {  58170, RB_LANE_MID , RB_NOTE_NORMAL },
+  {  58684, RB_LANE_TOP , RB_NOTE_NORMAL },
 };
 
-const Chart *chart_get_builtin(void) { return &s_demo_chart; }
+static const Chart s_charts[] = {
+  { .title = "Never Gonna Give You Up", .notes = s_ngg_notes,
+    .note_count = (uint16_t)(sizeof(s_ngg_notes) / sizeof(s_ngg_notes[0])),
+    .bpm = 118, .lead_in_ms = 2000, .end_ms = 61448 },
+  { .title = "You Are Not Alone", .notes = s_yana_notes,
+    .note_count = (uint16_t)(sizeof(s_yana_notes) / sizeof(s_yana_notes[0])),
+    .bpm = 59, .lead_in_ms = 2000, .end_ms = 61449 },
+};
+
+uint8_t chart_count(void) {
+  return (uint8_t)(sizeof(s_charts) / sizeof(s_charts[0]));
+}
+
+const Chart *chart_get(uint8_t index) {
+  return (index < chart_count()) ? &s_charts[index] : &s_charts[0];
+}
 
 bool chart_load_from_resource(uint32_t resource_id, Chart *out_chart) {
   (void)resource_id;

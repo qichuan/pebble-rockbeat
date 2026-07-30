@@ -299,24 +299,33 @@ static void test_long_pause_does_not_skip_the_song(void) {
 // The built-in chart
 // ---------------------------------------------------------------------------
 
-static void test_builtin_chart_is_valid(void) {
-  const Chart *const chart = chart_get_builtin();
-  CHECK(chart != NULL, "builtin chart must exist");
-  CHECK(chart->note_count > 0, "builtin chart must have notes");
-  CHECK(chart->note_count <= RB_MAX_NOTES, "builtin chart has %u notes, pool is %d",
-        (unsigned)chart->note_count, RB_MAX_NOTES);
+// Runs over EVERY compiled-in song, not just the first. A second song is a
+// second chance to violate the spacing invariant, and it is generated from a
+// different MIDI at a different tempo -- so checking only song 0 would leave the
+// riskier one unchecked.
+static void prv_check_chart(uint8_t song) {
+  const Chart *const chart = chart_get(song);
+  CHECK(chart != NULL, "song %u must exist", (unsigned)song);
+  CHECK(chart->title != NULL && chart->title[0] != '\0',
+        "song %u must have a title -- the selector shows it", (unsigned)song);
+  CHECK(chart->note_count > 0, "song %u must have notes", (unsigned)song);
+  CHECK(chart->note_count <= RB_MAX_NOTES, "song %u has %u notes, pool is %d",
+        (unsigned)song, (unsigned)chart->note_count, RB_MAX_NOTES);
 
   uint32_t last_in_lane[RB_LANE_COUNT] = { 0 };
   bool seen_lane[RB_LANE_COUNT] = { false };
 
   for (uint16_t i = 0; i < chart->note_count; i++) {
     const ChartNote *const n = &chart->notes[i];
-    CHECK(n->lane < RB_LANE_COUNT, "note %u has lane %u", (unsigned)i, (unsigned)n->lane);
-    CHECK(n->type < RB_NOTE_TYPE_COUNT, "note %u has type %u", (unsigned)i, (unsigned)n->type);
+    CHECK(n->lane < RB_LANE_COUNT, "song %u note %u has lane %u",
+          (unsigned)song, (unsigned)i, (unsigned)n->lane);
+    CHECK(n->type < RB_NOTE_TYPE_COUNT, "song %u note %u has type %u",
+          (unsigned)song, (unsigned)i, (unsigned)n->type);
 
     if (i > 0) {
       CHECK(n->hit_time_ms >= chart->notes[i - 1].hit_time_ms,
-            "chart must be sorted ascending; note %u breaks it", (unsigned)i);
+            "song %u must be sorted ascending; note %u breaks it",
+            (unsigned)song, (unsigned)i);
     }
 
     // THE invariant the generated chart has to respect. Two notes in one lane
@@ -327,21 +336,38 @@ static void test_builtin_chart_is_valid(void) {
     // same-lane interval is an eighth at 118 BPM (254ms).
     if (seen_lane[n->lane]) {
       const uint32_t gap = n->hit_time_ms - last_in_lane[n->lane];
-      CHECK(gap > 2 * RB_MISS_MS, "lane %u notes only %lums apart at %lums -- windows overlap",
-            (unsigned)n->lane, (unsigned long)gap, (unsigned long)n->hit_time_ms);
+      CHECK(gap > 2 * RB_MISS_MS,
+            "song %u lane %u notes only %lums apart at %lums -- windows overlap",
+            (unsigned)song, (unsigned)n->lane, (unsigned long)gap,
+            (unsigned long)n->hit_time_ms);
     }
     seen_lane[n->lane] = true;
     last_in_lane[n->lane] = n->hit_time_ms;
   }
 
   CHECK(chart->end_ms > chart->notes[chart->note_count - 1].hit_time_ms,
-        "end_ms must trail the last note");
+        "song %u end_ms must trail the last note", (unsigned)song);
+}
+
+static void test_builtin_chart_is_valid(void) {
+  CHECK(chart_count() > 0, "there must be at least one song");
+  CHECK(chart_count() <= RB_MAX_SONGS,
+        "chart_count() is %u but the saved-bests arrays hold %d",
+        (unsigned)chart_count(), RB_MAX_SONGS);
+  for (uint8_t song = 0; song < chart_count(); song++) {
+    prv_check_chart(song);
+  }
+
+  // An out-of-range index must clamp rather than read past the table: the song
+  // selection is persisted-adjacent state and a stale one must not fault.
+  CHECK(chart_get(chart_count()) == chart_get(0), "out-of-range index must clamp");
+  CHECK(chart_get(200) == chart_get(0), "far out-of-range index must clamp");
 }
 
 // A full perfect playthrough of the real chart: every note hit dead on, with
 // the frame loop stepping in between exactly as it would on the watch.
 static void test_perfect_playthrough(void) {
-  const Chart *const chart = chart_get_builtin();
+  const Chart *const chart = chart_get(0);
   game_start(chart, 0);
 
   uint32_t expected = 0;
@@ -373,7 +399,7 @@ static void test_perfect_playthrough(void) {
 // the combo survives -- a chart that only works at zero offset would be a
 // judgment bug hiding behind a lucky test.
 static void test_sloppy_playthrough_keeps_combo(void) {
-  const Chart *const chart = chart_get_builtin();
+  const Chart *const chart = chart_get(0);
   game_start(chart, 0);
 
   for (uint16_t i = 0; i < chart->note_count; i++) {
@@ -391,7 +417,7 @@ static void test_sloppy_playthrough_keeps_combo(void) {
 // The render and judging scans both start from this cursor, so it must never
 // walk backwards.
 static void test_cursor_is_monotonic(void) {
-  const Chart *const chart = chart_get_builtin();
+  const Chart *const chart = chart_get(0);
   game_start(chart, 0);
 
   uint16_t last = 0;

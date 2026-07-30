@@ -41,7 +41,8 @@ bool audio_is_enabled(void);
 // waits for the next chunk boundary rather than restarting the current chunk:
 // the sequencer cannot be started from the middle of a chunk, and a few seconds
 // of silence is far better than a few seconds of music against the wrong notes.
-void audio_song_start(uint32_t elapsed_ms);
+// `song` indexes the same table as chart_get().
+void audio_song_start(uint8_t song, uint32_t elapsed_ms);
 
 // Releases the music when SONG time reaches its start. Call once per frame
 // from the frame timer, after the game has stepped. Must be song time, not

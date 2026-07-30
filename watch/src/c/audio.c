@@ -29,6 +29,11 @@ static bool s_armed;
 static uint16_t s_armed_chunk;
 static uint32_t s_armed_at_ms;
 
+// Which song's music is playing. Set once at audio_song_start() and read by
+// every music_chunk() lookup, so a chunk can never be fetched from a song other
+// than the one whose chart is on screen.
+static uint8_t s_song;
+
 // Set by the speaker's finish callback, consumed by the app task. `volatile`
 // because the two run in different contexts and the compiler must not cache
 // either across the frame loop's read.
@@ -117,7 +122,7 @@ static void prv_handle_finished(uint32_t elapsed_ms) {
     return;
   }
 
-  const MusicChunk *const next = music_chunk(s_next_chunk);
+  const MusicChunk *const next = music_chunk(s_song, s_next_chunk);
   if (next == NULL) {
     prv_play_chunk(s_next_chunk);  // ends the song and clears the callback
     return;
@@ -151,7 +156,7 @@ static void prv_handle_finished(uint32_t elapsed_ms) {
 }
 
 static void prv_play_chunk(uint16_t index) {
-  const MusicChunk *const chunk = music_chunk(index);
+  const MusicChunk *const chunk = music_chunk(s_song, index);
   if (chunk == NULL) {  // song over
     s_playing = false;
     speaker_set_finish_callback(NULL, NULL);
@@ -200,9 +205,10 @@ void audio_init(void) {
   s_next_chunk = 0;
   s_armed = false;
   s_finished = false;
+  s_song = 0;
 #if RB_DEBUG_LOG_AUDIO
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "music: %u chunks, %lums",
-          (unsigned)music_chunk_count(), (unsigned long)music_total_ms());
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "music: song 0 has %u chunks, %lums",
+          (unsigned)music_chunk_count(s_song), (unsigned long)music_total_ms(s_song));
 #endif
 }
 
@@ -221,10 +227,11 @@ bool audio_is_enabled(void) {
   return s_enabled;
 }
 
-void audio_song_start(uint32_t elapsed_ms) {
+void audio_song_start(uint8_t song, uint32_t elapsed_ms) {
   if (s_playing || s_armed || !s_enabled) {
     return;
   }
+  s_song = song;
 
   // Checked once per song rather than per frame. An app cannot override the
   // system mute, so when it is set there is nothing to be gained by playing.
@@ -232,8 +239,8 @@ void audio_song_start(uint32_t elapsed_ms) {
   const bool quiet = quiet_time_is_active();
   s_suppressed = muted || quiet;
 #if RB_DEBUG_LOG_AUDIO
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "audio start at %lums: muted=%d quiet=%d",
-          (unsigned long)elapsed_ms, (int)muted, (int)quiet);
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "audio start song %u at %lums: muted=%d quiet=%d",
+          (unsigned)song, (unsigned long)elapsed_ms, (int)muted, (int)quiet);
 #endif
   if (s_suppressed) {
     return;
@@ -242,11 +249,11 @@ void audio_song_start(uint32_t elapsed_ms) {
   // Find the first chunk that has not already been passed. On a fresh song
   // that is chunk 0; on resume it is the next boundary, and the gap until then
   // stays silent rather than playing the wrong part of the song.
-  const uint16_t count = music_chunk_count();
+  const uint16_t count = music_chunk_count(s_song);
   uint16_t index = count;
   uint32_t start_at_ms = 0;
   for (uint16_t i = 0; i < count; i++) {
-    const MusicChunk *const chunk = music_chunk(i);
+    const MusicChunk *const chunk = music_chunk(s_song, i);
     const uint32_t song_ms = prv_chunk_due_ms(chunk);
     if (song_ms >= elapsed_ms) {
       index = i;
@@ -312,7 +319,7 @@ void audio_init(void) {}
 bool audio_is_available(void) { return false; }
 void audio_set_enabled(bool enabled) { s_enabled = enabled; }
 bool audio_is_enabled(void) { return s_enabled; }
-void audio_song_start(uint32_t elapsed_ms) { (void)elapsed_ms; }
+void audio_song_start(uint8_t song, uint32_t elapsed_ms) { (void)song; (void)elapsed_ms; }
 void audio_tick(uint32_t elapsed_ms) { (void)elapsed_ms; }
 void audio_song_stop(void) {}
 

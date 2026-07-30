@@ -15,6 +15,11 @@ static Layer *s_canvas;
 static AppTimer *s_timer;
 static const Chart *s_chart;
 
+// Which song the title screen has selected. Everything downstream -- the chart,
+// the music, the high score -- is indexed by this one value, so they cannot get
+// out of step with each other.
+static uint8_t s_song;
+
 // ---------------------------------------------------------------------------
 // Frame timer -- runs only while a song is actually playing. Title, pause and
 // results are static, so an idle 30Hz wakeup would be pure battery cost.
@@ -49,9 +54,10 @@ static void prv_enter_title(void) {
 
 static void prv_start_song(void) {
   feedback_reset();
+  s_chart = chart_get(s_song);
   game_start(s_chart, clock_now_ms());
   game_set_screen(RB_SCREEN_PLAYING);
-  audio_song_start(game_elapsed_ms());
+  audio_song_start(s_song, game_elapsed_ms());
   prv_timer_start();
   layer_mark_dirty(s_canvas);
 }
@@ -63,7 +69,7 @@ static void prv_enter_results(void) {
   feedback_silence();
   // The only persist write in the app, and deliberately not in the frame loop:
   // a flash write mid-song could stall a frame.
-  save_record(game_score(), game_max_combo());
+  save_record(s_song, game_score(), game_max_combo());
   layer_mark_dirty(s_canvas);
 }
 
@@ -79,7 +85,7 @@ static void prv_pause(void) {
 static void prv_resume(void) {
   game_resume(clock_now_ms());
   game_set_screen(RB_SCREEN_PLAYING);
-  audio_song_start(game_elapsed_ms());
+  audio_song_start(s_song, game_elapsed_ms());
   prv_timer_start();
   layer_mark_dirty(s_canvas);
 }
@@ -122,21 +128,34 @@ static void prv_lane_hit(uint8_t lane, uint32_t press_now_ms) {
 static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
   switch (game_screen()) {
     case RB_SCREEN_PLAYING:
-      prv_lane_hit(lane, press_now_ms);
+      if (lane < RB_LANE_COUNT) {
+        prv_lane_hit(lane, press_now_ms);
+      }
       break;
 
     case RB_SCREEN_TITLE:
+      // UP and DOWN move the selection, matching the buttons' physical order --
+      // UP goes up the list. SELECT plays whatever is selected.
       if (lane == RB_LANE_MID) {
         prv_start_song();
-      } else if (lane == RB_LANE_TOP) {
-        const bool on = !audio_is_enabled();
-        audio_set_enabled(on);
-        save_set_sound(on);
-        layer_mark_dirty(s_canvas);
       } else {
-        const bool on = !feedback_haptics_enabled();
-        feedback_set_haptics(on);
-        save_set_haptics(on);
+        const uint8_t count = chart_count();
+        if (lane == RB_LANE_TOP) {
+          s_song = (uint8_t)((s_song + count - 1) % count);
+        } else {
+          s_song = (uint8_t)((s_song + 1) % count);
+        }
+        s_chart = chart_get(s_song);
+        // The title screen shows the selected song's chart and best, so it has
+        // to be the loaded one even before play starts.
+        game_start(s_chart, 0);
+#if RB_DEBUG_LOG_JUDGMENTS
+        // Selection is only verifiable this way once `pebble emu-button` has
+        // wedged the emulator's screenshot service, which pressing a button to
+        // change the selection reliably does. Logs keep working.
+        APP_LOG(APP_LOG_LEVEL_DEBUG, "song %u/%u selected: %s",
+                (unsigned)s_song, (unsigned)chart_count(), s_chart->title);
+#endif
         layer_mark_dirty(s_canvas);
       }
       break;
@@ -315,6 +334,7 @@ static void prv_window_appear(Window *window) {
   (void)window;
   clock_init();
 #if RB_DEBUG_AUTOSTART
+  s_song = (chart_count() > RB_DEBUG_AUTOSTART_SONG) ? RB_DEBUG_AUTOSTART_SONG : 0;
   prv_start_song();
 #else
   prv_enter_title();
@@ -338,13 +358,17 @@ static void prv_init(void) {
 #endif
   save_load();
   audio_init();
-  audio_set_enabled(save_sound_enabled());
-  feedback_set_haptics(save_haptics_enabled());
+  // Sound and haptics are always on. They were once togglable from the title
+  // screen, which is where the song selector now lives; the buttons could not
+  // do both, and a rhythm game with the sound off is not the thing anyway.
+  audio_set_enabled(true);
+  feedback_set_haptics(true);
 
   // A resource-backed chart would be preferred if one existed; the loader is
-  // stubbed in v1, so this always falls through to the compiled-in demo.
+  // stubbed in v1, so this always falls through to the compiled-in songs.
   static Chart loaded;
-  s_chart = chart_load_from_resource(0, &loaded) ? &loaded : chart_get_builtin();
+  s_song = 0;
+  s_chart = chart_load_from_resource(0, &loaded) ? &loaded : chart_get(s_song);
   game_start(s_chart, 0);  // populate chart-dependent state for the title screen
 
   const RbInputHandlers handlers = {

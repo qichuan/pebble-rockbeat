@@ -33,6 +33,12 @@ typedef enum {
   RB_LANE_COUNT,
 } RbLane;
 
+// Reported for a button press that is not a gameplay lane -- DOWN, which the
+// menus use but the playfield has no band for. Deliberately outside the enum:
+// it must never index a lane-sized array, and every consumer has to decide what
+// to do with it rather than silently treating it as lane 0.
+#define RB_LANE_NONE 0xFF
+
 typedef enum {
   RB_NOTE_NORMAL = 0,
   RB_NOTE_BIG,
@@ -60,12 +66,18 @@ typedef struct {
   uint32_t end_ms;      // elapsed time at which the results screen appears
 } Chart;
 
-// The compiled-in demo song. Never returns NULL.
-const Chart *chart_get_builtin(void);
+// How many songs are compiled in. The title screen's selector is driven by this,
+// so adding a song to SONGS in tools/make_chart.py is the whole change -- no C
+// edit is needed to make it selectable.
+uint8_t chart_count(void);
+
+// Never returns NULL: an out-of-range index clamps to the first song, so a
+// stale saved selection can never leave the app without a chart to play.
+const Chart *chart_get(uint8_t index);
 
 // Forward-compatible hook for loading a chart from a resource file instead of
 // having it compiled in. v1 always returns false and leaves out_chart
-// untouched, so callers fall back to chart_get_builtin().
+// untouched, so callers fall back to chart_get().
 //
 // The intended on-disk layout, little-endian throughout:
 //

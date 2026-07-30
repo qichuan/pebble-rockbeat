@@ -56,9 +56,20 @@ typedef struct {
   uint32_t duration_ms;  // every track in a chunk is padded to exactly this
 } MusicChunk;
 
-uint16_t music_chunk_count(void);
+// One entry per playable song, indexed the same way as chart_get(). The two
+// tables are generated from the same list in one pass, so song N's music and
+// song N's chart always come from the same MIDI and the same tempo map.
+typedef struct {
+  const MusicChunk *chunks;
+  uint16_t chunk_count;
+  uint32_t total_ms;
+} MusicSong;
 
-// NULL past the end -- which is how audio.c detects the song is over.
-const MusicChunk *music_chunk(uint16_t index);
+uint16_t music_chunk_count(uint8_t song);
 
-uint32_t music_total_ms(void);
+// NULL past the end -- which is how audio.c detects the song is over. Also NULL
+// for an unknown song, so a bad index falls silent rather than playing the
+// wrong tune.
+const MusicChunk *music_chunk(uint8_t song, uint16_t index);
+
+uint32_t music_total_ms(uint8_t song);

@@ -23,7 +23,7 @@ pebble logs --emulator emery
 pebble kill
 ```
 
-From the repo root: `./tools/run_tests.sh` (expect `OK: 2595 checks passed`).
+From the repo root: `./tools/run_tests.sh` (expect `OK: 2886 checks passed`).
 
 This tool version does **not** accept `--scale`. `--vnc` disables emulator audio.
 
@@ -276,6 +276,38 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   in two gives 90px bands centred at y=69/159, putting the SELECT lane 45px below
   the SELECT button. `render.c` therefore divides by `RB_LANE_SLOTS` (3) and
   leaves the bottom band empty. Do not "tidy" that back to `RB_LANE_COUNT`.
+
+- **Two songs, and adding a third is a generator-only change.** `SONGS` in
+  `tools/make_chart.py` is the whole configuration: title, C identifier stem,
+  melody `.mid`, start bar, bar count. `chart_count()` drives the title-screen
+  selector, `save.c` allocates persist keys per song from a base, and
+  `render.c`'s list scrolls — so no C file needs editing to make a new song
+  appear. The section (which bars) is the one thing that cannot be derived; it
+  is a musical judgement.
+
+- **Song 2 is "You Are Not Alone"**: 59 BPM, bars 58-72 (the final chorus, ~57s
+  — the same length as song 1 from a quarter of the bars), melody channel 3 /
+  GM 73, 71 notes at 1.25/s against song 1's 2.76/s.
+
+- **Sound and haptics are always on.** The toggles used to live on UP/DOWN on the
+  title screen, which is where the song selector now is. `save.c` no longer
+  stores them.
+
+- **DOWN is subscribed again, but it is NOT a lane.** It reports `RB_LANE_NONE`
+  (0xFF, deliberately outside the `RbLane` enum so it can never index a
+  lane-sized array). Menus use it to move the selection; `main.c` ignores it
+  during play. Do not alias it onto a lane — the layout premise is that a lane
+  sits at its button's vertical position, and there is no third band.
+
+- **Music chunks are bounded in MILLISECONDS, not bars** (`CHUNK_MAX_MS`). Bars
+  were the unit until a song at half the tempo made 8 bars 32.5s instead of
+  16.3s — and **a 32.5s chunk never reports finishing at all**. No error, nothing
+  in the log; the music just stops after the first chunk, because the handover is
+  driven by that callback. Note count was not the difference (123 notes failed,
+  159 works). Reproduced every run.
+  - Anything finer than that is emulator noise: boundary error at 16.3s measured
+    +33/+17/+10ms on one run and +4/-189/+320ms on another with **identical
+    inputs**. Do not tune `CHUNK_MAX_MS` against those numbers.
 
 - **The chart is EVERY melody note, 1:1. Do not reintroduce selection.** 157
   notes for 157 melody notes, so a note heard is always a note to hit and a note
