@@ -407,12 +407,24 @@ static void prv_draw_results(GContext *ctx, const RbLayout *lay) {
 
 void render_update_proc(Layer *layer, GContext *ctx) {
   const RbLayout lay = prv_layout(layer);
+  const RbScreen screen = game_screen();
 
-  graphics_context_set_antialiased(ctx, true);
+  // Antialiasing is paid for per drawn pixel, and it is by far the most
+  // expensive thing on this screen: a gameplay frame draws a dozen or more
+  // circles, several of them stroked three pixels wide, and it draws them 25
+  // times a second. On the emulator that is free. On the watch it was the lag.
+  //
+  // So it is spent where it is seen and not where it is felt. The title, pause
+  // and results screens are drawn ONCE and then sit still under the player's
+  // eye, so they keep it. The playfield is in constant motion, where a smooth
+  // frame rate reads as quality far more than a smooth circle edge does.
+  const bool playing = (screen == RB_SCREEN_PLAYING || screen == RB_SCREEN_PAUSED);
+  graphics_context_set_antialiased(ctx, !playing);
+
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, lay.bounds, 0, GCornerNone);
 
-  switch (game_screen()) {
+  switch (screen) {
     case RB_SCREEN_TITLE:
       prv_draw_title(ctx, &lay);
       break;
@@ -421,8 +433,10 @@ void render_update_proc(Layer *layer, GContext *ctx) {
       break;
     case RB_SCREEN_PAUSED:
       // The field stays visible behind the panel so the player can see exactly
-      // what they are coming back to.
+      // what they are coming back to. The panel itself is static, so it gets
+      // antialiasing back once the playfield underneath it has been drawn.
       prv_draw_play(ctx, &lay);
+      graphics_context_set_antialiased(ctx, true);
       prv_draw_pause(ctx, &lay);
       break;
     case RB_SCREEN_RESULTS:

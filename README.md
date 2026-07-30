@@ -147,8 +147,11 @@ real time and cannot be steered, so every millisecond the clock is wrong is a
 millisecond the music sits away from the notes. See "Keeping the music on the
 notes".
 
-The cost of the whole scheme is that timestamps quantise to `RB_CLOCK_TICK_MS`
-(10 ms) — a bounded, predictable error well inside the 60 ms Perfect window.
+This whole scheme is the **fallback**. Where `time_ms()` proves usable the clock
+reads it directly and runs no timer at all — see "Which clock is running is
+decided by measurement". The cost while the tick is in use is that timestamps
+quantise to `RB_CLOCK_TICK_MS` (20 ms), a bounded and predictable error well
+inside the 60 ms Perfect window; in direct mode there is no quantisation.
 
 ## Layout
 
@@ -464,12 +467,52 @@ gapless. Measured after the change, sync actually *improved* — the three
 boundaries came in at +33/+17/+10 ms — because a short frame-length gap costs far
 less than the cold-restart penalty a long one does.
 
-**It was laggy.** The clock ticked at 10 ms — 100 app-task wakeups a second — on
-top of a 30 fps full-screen redraw of a 200x228 colour framebuffer. Now 20 ms and
-25 fps. Neither costs timing accuracy: press timestamps come from the click
-handler rather than the frame tick, and the clock's rate comes from real second
-boundaries rather than the tick, so `RB_CLOCK_TICK_MS` sets only how finely the
-gap between seconds is interpolated.
+**It was laggy**, and reducing the frame rate alone did not fix it. Three things
+did, in rough order of effect:
+
+- **Antialiasing is now off for the playfield.** It is paid for per drawn pixel,
+  and a gameplay frame draws a dozen or more circles — several of them stroked
+  three pixels wide — 25 times a second. On the emulator that is free; on the
+  watch it was the single largest cost. The title, pause and results screens are
+  drawn once and then sat under the player's eye, so they keep it. A frozen
+  gameplay frame with it off is visually indistinguishable at this size.
+- **The clock now runs no timer at all** where `time_ms()` proves usable, instead
+  of an AppTimer wakeup every 20 ms for the whole song. See below.
+- 25 fps and a 20 ms tick, down from 30 fps and 10 ms (100 wakeups a second).
+
+None of it costs timing accuracy: press timestamps come from the click handler
+rather than the frame tick.
+
+### Which clock is running is decided by measurement
+
+The tick clock exists because this project once recorded `time_ms()`'s
+millisecond field advancing only ~150–190 per real second. That does not
+reproduce on the current emulator, which measures **1004 ms and 982 ms** of
+advance per second with zero stalls — so it was either an older tool version or a
+misattribution. A clock is not the place to bet on which, so the workaround stays
+as a tested fallback and the choice is made at runtime from evidence.
+
+Two conditions, and both are required:
+
+- **Rate** — the field's forward advance across one real second must be ~1000 ms,
+  summing deltas and counting a wrap as +1000.
+- **Granularity** — it must not stall across a whole tick. A field that updates in
+  coarse jumps sums to the right total per second while standing still in
+  between, and standing still is precisely the stutter direct mode exists to
+  remove.
+
+The rate test is deliberately *not* "how high does ms get within a second". That
+is phase-dependent — a field advancing 190/sec still spans a different 190-wide
+band each second, so about one second in five it peaks near 999 and passes. It
+was measured passing on the emulator and switching the clock into a mode the
+platform could not support.
+
+When the tick is in use, note what its failure mode would otherwise have been: it
+reconstructs the sub-second position as `ticks × estimated period`, so an
+estimate slightly high makes the interpolation saturate and the clock **stall**
+until the next second, and slightly low makes it **jump** at the boundary. Either
+is a hitch once a second, every second — and worse than looking bad, it moves the
+notes relative to their own hit windows.
 
 Chunks were also doubled to 8 bars, halving the number of handovers from 7 to 4.
 Check the note counts this script prints against `MAX_NOTES_PER_TRACK` before

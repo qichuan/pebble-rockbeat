@@ -142,6 +142,34 @@
 // then step backwards across it.
 #define RB_CLOCK_MAX_INTERP_MS 1000
 
+// Deciding whether time_ms()'s millisecond field can be trusted, which decides
+// whether the clock needs a tick timer at all. See clock.c.
+//
+// The test is how far the field ADVANCES across one real second, summing forward
+// deltas and counting a wrap as +1000. A field that counts milliseconds advances
+// ~1000; the emulator's advances ~190. The window is generous either side
+// because the sum is built from tick samples and a tick can straddle a boundary,
+// but it is nowhere near wide enough to admit 190. An upper bound as well as a
+// lower one, so a field that races is rejected too rather than trusted blindly.
+//
+// Do NOT replace this with "how high does ms get within a second". That was
+// tried and it is phase-dependent: a field advancing 190/sec still spans a
+// different 190-wide band each second, so about one second in five it peaks near
+// 999 and passes. Measured on the emulator, which promptly switched to a clock
+// it cannot support.
+#define RB_CLOCK_DIRECT_MIN_ADVANCE_MS 850
+#define RB_CLOCK_DIRECT_MAX_ADVANCE_MS 1150
+// ...and the field must also be FINE-GRAINED, not merely correct on average. A
+// field that updates in coarse steps sums to the right total per second while
+// standing still in between, which on a scrolling playfield is exactly the
+// stutter direct mode exists to remove. Counted as ticks across which the field
+// did not move at all; a fine-grained field moves on every one. Measured on the
+// emulator, whose field advances ~1000/sec and still stalls -- so it correctly
+// keeps the interpolated clock, which is smoother there.
+#define RB_CLOCK_DIRECT_MAX_STALLS 1
+
+#define RB_CLOCK_DIRECT_GOOD_SECONDS 2
+
 // Largest gap in time() that is still treated as elapsed time rather than as the
 // wall clock being stepped. A few seconds means the app was descheduled and the
 // song really has moved on; more than that is an NTP or timezone correction, and

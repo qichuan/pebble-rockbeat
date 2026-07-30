@@ -3,25 +3,31 @@
 #include "rb_config.h"
 
 // ---------------------------------------------------------------------------
-// The game clock is real seconds, interpolated by a tick.
+// The game clock reads time_ms() where that works, and reconstructs the
+// milliseconds from a tick where it does not. Which one is in use is decided at
+// runtime, by measurement -- see "Direct mode" below.
 //
-// Two things about this platform force the shape of this file.
+// The history matters, because it is why the fallback exists at all. This
+// project recorded time_ms()'s two halves disagreeing: the seconds field exact,
+// the millisecond field advancing only ~150-190 per real second while still
+// wrapping at 1000. A `seconds*1000 + ms` clock built on that crawls and then
+// lurches 1010ms in a single frame, which teleports the playfield forward by a
+// second of scrolling and makes the game unhittable. That is what the tick was
+// built to work around.
 //
-// FIRST: time_ms()'s two halves disagree. The seconds field tracks real time
-// exactly; the millisecond field, documented as "milliseconds since the last
-// second", actually advances only ~150-190 per real second while still wrapping
-// at 1000. A `seconds*1000 + ms` clock therefore crawls and then lurches 1010ms
-// in a single frame, which teleports the whole playfield forward by a second's
-// worth of scrolling and makes the game unhittable. So the millisecond field is
-// never read. Only the seconds field is trusted.
+// It does not reproduce on the current emulator, where the field measures
+// 1004ms and 982ms of advance per second with no stalls. So it was either an
+// older tool version or a misattribution -- but a clock is not the place to bet
+// on which, so the workaround stays as a tested fallback and the choice is made
+// from evidence at runtime rather than from this comment.
 //
-// SECOND: whole seconds are far too coarse for a rhythm game, so the gap between
-// them has to be filled. A fixed-interval AppTimer supplies the subdivision --
-// but its period is NOT RB_CLOCK_TICK_MS. A timer asked for 10ms fires nearer
-// 11ms at rest, and during app startup it is slower still and changes fast: the
-// frame interval alone was measured falling 69ms -> 37ms over the first six
-// seconds as the app settled. So the tick period has to be measured, and the
-// measurement is always slightly stale.
+// The fallback's problem: whole seconds are far too coarse for a rhythm game, so
+// the gap between them has to be filled. A fixed-interval AppTimer supplies the
+// subdivision -- but its period is NOT RB_CLOCK_TICK_MS. A timer asked for 10ms
+// fires nearer 11ms at rest, and during app startup it is slower still and
+// changes fast: the frame interval alone was measured falling 69ms -> 37ms over
+// the first six seconds as the app settled. So the tick period has to be
+// measured, and the measurement is always slightly stale.
 //
 // ---------------------------------------------------------------------------
 // Why the tick INTERPOLATES rather than accumulates
@@ -94,6 +100,49 @@ static time_t s_last_s;
 static bool s_measured;
 static bool s_running;
 
+// ---------------------------------------------------------------------------
+// Direct mode: use time_ms() and run no timer at all.
+//
+// Everything above exists to work around a millisecond field that does not
+// count milliseconds. Where the field DOES work, reconstructing from a tick what
+// the platform already reports is both wasteful and worse:
+//
+//   * it costs an AppTimer wakeup every RB_CLOCK_TICK_MS, all song long, on the
+//     same app task that has to draw the frame;
+//   * and the reconstruction is only as good as its period estimate. Estimate
+//     high and the interpolation saturates against the clamp and the clock
+//     STALLS until the next second; estimate low and it falls short and JUMPS
+//     at the boundary. Either way it is a hitch once a second, every second,
+//     which is precisely the shape of "laggy" that a rhythm game cannot afford
+//     -- it moves the notes relative to their own hit windows.
+//
+// So the field is TESTED rather than assumed, on two counts: how far it ADVANCES
+// across one real second (summing forward deltas, a wrap counting as +1000), and
+// whether it ever STALLS across a whole tick. Rate alone is not enough -- a
+// field that jumps in coarse steps sums to the right total per second while
+// standing still in between, and standing still is the stutter this is meant to
+// remove.
+//
+// The obvious test, "how high does it get within a second", does not work, and
+// was tried: a field advancing 190 per second while still wrapping at 1000 spans
+// a different 190-wide band each second, so roughly one second in five it peaks
+// near 999 and looks perfect. Measuring the advance is immune to that, because
+// it does not care where in the range the band sits.
+//
+// Two consecutive good seconds and the clock switches to reading time_ms()
+// directly and cancels the tick for good. The detection is also the safety
+// check: direct mode is only ever entered on evidence that the field works.
+// ---------------------------------------------------------------------------
+
+static bool s_direct;                // sticky: a property of the platform
+static uint32_t s_ms_advance;        // summed forward motion of the ms field
+static uint16_t s_prev_sample_ms;
+static uint8_t s_stalls_in_second;   // samples where the field did not move at all
+static uint8_t s_good_seconds;
+static time_t s_direct_anchor_s;
+static uint32_t s_direct_base_ms;    // keeps the switch continuous
+static uint32_t s_last_reported_ms;  // monotonic guard, direct mode only
+
 static void prv_tick(void *data);
 
 static void prv_schedule(void) {
@@ -102,17 +151,75 @@ static void prv_schedule(void) {
   }
 }
 
+// Interpolated (tick) reading. Also the value direct mode is anchored to, so the
+// switch between them cannot show a step.
+static uint32_t prv_interpolated_ms(void) {
+  uint32_t within_ms = ((s_ticks - s_ticks_at_boundary) * s_period_q8) >> Q8;
+  // Never reach past the boundary being filled towards. This clamp is what makes
+  // monotonicity structural -- see the header comment.
+  if (within_ms > RB_CLOCK_MAX_INTERP_MS) {
+    within_ms = RB_CLOCK_MAX_INTERP_MS;
+  }
+  return s_base_ms + within_ms;
+}
+
+static void prv_enter_direct(time_t now_s, uint16_t now_ms) {
+#if RB_DEBUG_LOG_AUDIO
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "clock: time_ms() verified, dropping the tick timer");
+#endif
+  s_direct_anchor_s = now_s;
+  // Anchor so the first direct reading equals the last interpolated one; the two
+  // then advance at the same rate, so the changeover is invisible.
+  s_direct_base_ms = prv_interpolated_ms() - now_ms;
+  s_last_reported_ms = 0;
+  s_direct = true;
+  clock_stop();       // the tick has no purpose now -- stop paying for it
+  s_running = true;   // ...but the clock itself is still running
+}
+
 static void prv_tick(void *data) {
   (void)data;
   s_tick = NULL;
 
   s_ticks++;
 
-  const time_t now_s = time(NULL);
+  time_t sampled_s = 0;
+  uint16_t sampled_ms = 0;
+  time_ms(&sampled_s, &sampled_ms);
+  // Forward motion since the last tick, with a wrap counted as a full turn.
+  const uint32_t delta = (uint32_t)((sampled_ms + 1000u - s_prev_sample_ms) % 1000u);
+  s_ms_advance += delta;
+  if (delta == 0u && s_stalls_in_second < 255u) {
+    s_stalls_in_second++;   // the field did not move across a whole tick
+  }
+  s_prev_sample_ms = sampled_ms;
+
+  const time_t now_s = sampled_s;
   if (now_s != s_last_s) {
     if (s_last_s != 0) {
       const time_t gap_s = now_s - s_last_s;
       if (gap_s == 1) {
+        // Does the millisecond field actually sweep a whole second? Judged on
+        // the second just finished, and only on clean one-second steps.
+        // Two conditions, and both matter. The RATE has to be right, or the
+        // clock is simply wrong. The GRANULARITY has to be fine, or the clock is
+        // right on average while standing still between updates -- which for a
+        // scrolling playfield is the very stutter this is meant to remove.
+        if (s_ms_advance >= RB_CLOCK_DIRECT_MIN_ADVANCE_MS &&
+            s_ms_advance <= RB_CLOCK_DIRECT_MAX_ADVANCE_MS &&
+            s_stalls_in_second <= RB_CLOCK_DIRECT_MAX_STALLS) {
+          s_good_seconds++;
+        } else {
+          s_good_seconds = 0;
+        }
+#if RB_DEBUG_LOG_AUDIO
+        // Says out loud which clock it is running, because which one is right
+        // depends on the machine. On a watch expect advance~1000 and a switch to
+        // direct mode; on the emulator, ~190 and no switch.
+        APP_LOG(APP_LOG_LEVEL_DEBUG, "clock: ms_advance=%lu stalls=%u good=%u ticks=%lu",
+                (unsigned long)s_ms_advance, (unsigned)s_stalls_in_second,
+                (unsigned)s_good_seconds, (unsigned long)(s_ticks - s_ticks_at_boundary));
+#endif
         const uint32_t ticks = s_ticks - s_ticks_at_boundary;
         if (ticks >= RB_CLOCK_MIN_TICKS_PER_SEC && ticks <= RB_CLOCK_MAX_TICKS_PER_SEC) {
           const uint32_t measured_q8 = (1000u << Q8) / ticks;
@@ -144,6 +251,13 @@ static void prv_tick(void *data) {
     }
     s_last_s = now_s;
     s_ticks_at_boundary = s_ticks;
+    s_ms_advance = 0;
+    s_stalls_in_second = 0;
+
+    if (s_good_seconds >= RB_CLOCK_DIRECT_GOOD_SECONDS) {
+      prv_enter_direct(now_s, sampled_ms);
+      return;  // deliberately not rescheduled -- direct mode runs no timer
+    }
   }
 
   prv_schedule();
@@ -156,7 +270,23 @@ void clock_init(void) {
   s_ticks_at_boundary = 0;
   s_last_s = 0;
   s_measured = false;
+  s_ms_advance = 0;
+  s_stalls_in_second = 0;
+  s_prev_sample_ms = 0;
+  s_good_seconds = 0;
   s_running = true;
+
+  // s_direct is NOT reset: whether time_ms() works is a property of the machine,
+  // not of this song, so it is established once and kept.
+  if (s_direct) {
+    time_t now_s = 0;
+    uint16_t now_ms = 0;
+    time_ms(&now_s, &now_ms);
+    s_direct_anchor_s = now_s;
+    s_direct_base_ms = 0u - now_ms;   // so the first reading is 0
+    s_last_reported_ms = 0;
+    return;                            // no timer in direct mode
+  }
   prv_schedule();
 }
 
@@ -169,11 +299,23 @@ void clock_stop(void) {
 }
 
 uint32_t clock_now_ms(void) {
-  uint32_t within_ms = ((s_ticks - s_ticks_at_boundary) * s_period_q8) >> Q8;
-  // Never reach past the boundary being filled towards. This clamp is what makes
-  // monotonicity structural -- see the header comment.
-  if (within_ms > RB_CLOCK_MAX_INTERP_MS) {
-    within_ms = RB_CLOCK_MAX_INTERP_MS;
+  if (!s_direct) {
+    return prv_interpolated_ms();
   }
-  return s_base_ms + within_ms;
+
+  time_t now_s = 0;
+  uint16_t now_ms = 0;
+  time_ms(&now_s, &now_ms);
+  const uint32_t now =
+      s_direct_base_ms + (uint32_t)(now_s - s_direct_anchor_s) * 1000u + now_ms;
+
+  // The seconds and milliseconds fields are read as one call but are not one
+  // register; a sample taken across the wrap can show the new second with the
+  // old millisecond and go momentarily backwards. Cheap to clamp, and a clock
+  // that steps back drags pending notes through their hit windows.
+  if (now < s_last_reported_ms) {
+    return s_last_reported_ms;
+  }
+  s_last_reported_ms = now;
+  return now;
 }

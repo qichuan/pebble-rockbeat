@@ -218,10 +218,37 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 
 - **The app task is the scarce resource on hardware, and the emulator hides it.**
   A 10ms clock tick (100 wakeups/sec) plus a 30fps full-screen redraw was fine on
-  the emulator and *laggy on the watch*. Now 20ms and 25fps. Neither costs timing
-  accuracy: press timestamps are sampled in the click handler, not on the frame
-  tick, and the clock's rate comes from real second boundaries, not the tick —
-  `RB_CLOCK_TICK_MS` only sets the interpolation resolution.
+  the emulator and *laggy on the watch*. Three things fixed it, in rough order of
+  effect:
+  - **Antialiasing is off for the playfield** (`render.c`). It is paid per drawn
+    pixel, and a gameplay frame draws a dozen-plus circles, several stroked 3px
+    wide, 25 times a second. The title/pause/results screens are drawn once and
+    then stared at, so they keep it. Do not "tidy" this back to one global
+    setting.
+  - **The clock runs no timer at all where `time_ms()` works** — see the clock
+    entry below.
+  - 25fps and a 20ms tick, down from 30fps and 10ms.
+
+  None of it costs timing accuracy: press timestamps are sampled in the click
+  handler, not on the frame tick.
+
+- **Whether `time_ms()`'s millisecond field works is decided at RUNTIME, by
+  measurement — not by this file.** The tick clock exists because the field was
+  once recorded advancing only ~150-190 per real second. It does not reproduce on
+  the current emulator, which measures 1004/982ms of advance with zero stalls, so
+  the clock now tests the field and reads it directly when it passes, cancelling
+  the tick entirely. Two conditions, and **both** are required:
+  - **rate** — forward advance over one real second must be ~1000ms;
+  - **granularity** — the field must not stall across a whole tick. A field that
+    updates in coarse jumps sums to the right total per second while standing
+    still in between, which on a scrolling playfield is exactly the stutter this
+    is meant to remove.
+
+  Do not replace the rate test with "how high does ms get within a second". That
+  is phase-dependent — a field advancing 190/sec still peaks near 999 about one
+  second in five — and it was measured passing on the emulator and switching to a
+  clock the platform could not support. `RB_DEBUG_LOG_AUDIO` logs which mode was
+  chosen and why; it is the only way to see this on hardware.
 
 - **A music re-sync that fires on jitter causes the problem it corrects.**
   Chained chunks track to ±60ms, but a chunk restarted cold after the sequencer
