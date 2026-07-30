@@ -23,7 +23,7 @@ pebble logs --emulator emery
 pebble kill
 ```
 
-From the repo root: `./tools/run_tests.sh` (expect `OK: 1545 checks passed`).
+From the repo root: `./tools/run_tests.sh` (expect `OK: 2612 checks passed`).
 
 This tool version does **not** accept `--scale`. `--vnc` disables emulator audio.
 
@@ -33,13 +33,13 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 |---|---|
 | `rb_config.h` | every tunable constant, with the reasoning for each |
 | `main.c` | window lifecycle, frame timer, the hit path, debug harness |
-| `clock.{c,h}` | the only caller of `time_ms()`; monotonic ms accumulator |
+| `clock.{c,h}` | self-calibrating tick clock; see the gotcha below |
 | `chart.{c,h}` | chart format, the demo song, forward-compatible loader |
 | `game.{c,h}` | song timeline, judgment, score, combo. **No Pebble APIs.** |
 | `render.{c,h}` | all drawing. **The only file with `graphics_*` calls.** |
 | `input.{c,h}` | raw-click handlers producing timestamped hit events |
 | `feedback.{c,h}` | hit-flash state and the haptics drop policy |
-| `audio.{c,h}` | PCM voice pool, mixer and pump; the only speaker caller |
+| `audio.{c,h}` | PCM voice pool, music streaming, mixer, own pump timer |
 | `save.{c,h}` | high score and toggles; the only `persist_*` caller |
 
 ## Key constraints & gotchas
@@ -55,12 +55,6 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   either calls `time_ms()`, `persist_*` or `graphics_*`, the tests stop building.
   This is why `game_judge_hit()` *returns* a judgment rather than firing effects,
   and why `game.c` takes `now_ms` as a parameter instead of reading a clock.
-
-- **`time_ms()` must only ever be used as a delta.** `epoch_seconds * 1000` is
-  ~1.78e12 in 2026 and does not fit in any 32-bit type, and the wall clock is not
-  monotonic — a phone sync can move it either way mid-song. `clock.c` accumulates
-  clamped deltas instead; a backwards step contributes 0 and a forward step is
-  capped at `RB_CLOCK_MAX_STEP_MS`.
 
 - **`pebble emu-button` can permanently wedge the emulator's screenshot
   service.** Afterwards every `screenshot` and `emu-button` on that instance
@@ -92,13 +86,45 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 
 - **Audio is measured, not assumed.** `RB_DEBUG_LOG_AUDIO` logs the
   `speaker_stream_open` result, the mute/quiet-time state, frame pacing, and any
-  short write. On the emulator the stream opens, nothing is muted, and there is
-  *zero* backpressure at a 40 ms lead.
+  short write. `speaker_stream_write()` accepts at most 512 bytes per call
+  (measured, undocumented) — which is why the pump has its own 20 ms timer rather
+  than running on the render frame.
 
-- **The emulator's clock runs about twice real time** (~2000 ms of song per
-  ~1000 ms of host wall time), with occasional 0 ms and 1000 ms frame deltas. So
-  `sleep N` in a capture script does not reliably reach a given point in the
-  song; use `RB_DEBUG_FREEZE_AT_MS` instead.
+- **The clock is a self-calibrating tick, and must stay that way.** `time_ms()`
+  has one trustworthy half and one useless half on the emulator: the seconds
+  field is exact, but the ms field advances only ~150-190 per real second while
+  wrapping at 1000. A `s*1000 + ms` clock therefore crawls and then lurches
+  ~1010ms once a second, which teleports every note half a screen and makes the
+  game unhittable. `clock.c` instead ticks on an AppTimer and uses ONLY the
+  seconds field, to measure what the tick period actually is. Three things are
+  load-bearing: the step is measured not assumed (a 10ms timer fires at ~14ms
+  here); it is held in Q8 fixed point (an integer step cannot express 13.5ms, and
+  rounding is a 4-7% rate error); and only the step is ever adjusted, never the
+  counter, because `clock_now_ms()` must stay monotonic. Do NOT "simplify" this
+  back to `s*1000 + ms`.
+
+- **Two independent things had to be right before the music stayed in sync**: the
+  clock above, AND giving the audio pump its own timer. Fixing only one left
+  audio dropping. If music stutters, check both.
+
+- **Audio quality is bounded by the output format, not by the source.** The
+  speaker takes 8/16kHz, 8/16-bit PCM. IMA ADPCM was tried to fit a longer
+  excerpt at 16kHz and measured WORSE -- 24.4dB SNR against 37.5dB for plain
+  8-bit -- because it buys bandwidth by spending precision. Do not re-add it.
+  With a fixed byte budget the real choice is length vs bandwidth; the current
+  build spends it on 16kHz and a shorter excerpt.
+
+- **`sleep N` in a capture script does not reliably reach a given point in the
+  song**; use `RB_DEBUG_FREEZE_AT_MS` instead.
+
+- **The chart is generated, not hand-written.** Do not hand-edit the note table
+  in `chart.c` — re-run `tools/make_chart.py`, which also re-cuts the audio from
+  the same excerpt offsets so the two cannot drift apart. It needs numpy (venv)
+  and ffmpeg; neither is needed to build the game.
+
+- **Resources are 920.8 KB, over the 256 KB app-store limit** (under emery's
+  1024 KB sideload budget). The build warns about this every time. Publishing
+  would need a much shorter excerpt or synthesised music.
 
 - **The back button cannot take a raw, long, or repeating click handler**
   (`pebble.h:97-98`). Single-click only. Fine here — BACK is never gameplay.

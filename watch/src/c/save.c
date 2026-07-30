@@ -57,6 +57,13 @@ void save_load(void) {
                      : 0;
   s_sound = prv_read_flag(RB_PERSIST_KEY_SOUND, true);
   s_haptics = prv_read_flag(RB_PERSIST_KEY_HAPTICS, true);
+
+#if RB_DEBUG_LOG_AUDIO
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "save_load v%ld: sound raw=%ld ->%d, haptics raw=%ld ->%d",
+          (long)persist_read_int(RB_PERSIST_KEY_VERSION),
+          (long)persist_read_int(RB_PERSIST_KEY_SOUND), (int)s_sound,
+          (long)persist_read_int(RB_PERSIST_KEY_HAPTICS), (int)s_haptics);
+#endif
 }
 
 uint32_t save_high_score(void) {

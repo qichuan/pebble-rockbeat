@@ -53,10 +53,12 @@
 // popping.
 #define RB_CULL_MARGIN 24
 
-// Travel from x=-16 to the target at x=168 is 184px; at 120px/s that is a
-// ~1.53s read-ahead. Slower felt sluggish and crowded the lane with notes;
-// faster left no time to react to the third lane once the eye had committed.
-#define RB_SCROLL_PX_PER_SEC 120
+// Travel from x=-16 to the target at x=168 is 184px; at 95px/s that is a ~1.94s
+// read-ahead. Cut from 120px/s (1.53s) after play-testing: at 90 BPM a beat is
+// 667ms, so the slower speed puts nearly three beats of runway on screen, which
+// is what makes an approaching note readable rather than a surprise. The chart
+// is sparse enough now that the extra dwell does not crowd the lanes.
+#define RB_SCROLL_PX_PER_SEC 95
 
 // ---------------------------------------------------------------------------
 // Judgment windows (milliseconds either side of the note's hit_time_ms)
@@ -71,8 +73,17 @@
 // touch the clock, which is already correct.
 // ---------------------------------------------------------------------------
 
-#define RB_PERFECT_MS 45
-#define RB_GOOD_MS 100
+// Widened from 45/100 after play-testing. Part of why hitting anything felt
+// impossible was the clock lurching (fixed in clock.c), but the windows were
+// also tight for a wrist-mounted button with mechanical travel, and the clock
+// now quantises to RB_CLOCK_TICK_MS which spends some of the budget.
+//
+// RB_MISS_MS stays at 160 deliberately: the chart generator guarantees 333ms
+// between notes in a lane, and 2*160 = 320 is what keeps their windows from
+// overlapping. Raising it past 166 would break that and must be done together
+// with SAME_LANE_MIN_MS in tools/make_chart.py.
+#define RB_PERFECT_MS 60
+#define RB_GOOD_MS 125
 #define RB_MISS_MS 160  // beyond this a note auto-misses; presses become strays
 
 // ---------------------------------------------------------------------------
@@ -92,12 +103,28 @@
 // Clock
 // ---------------------------------------------------------------------------
 
-// Largest delta clock_now_ms() will accept from one call to the next. The frame
-// timer polls every 33ms, so any observed gap much above that means either the
-// app was suspended or the wall clock moved. Absorbing such a gap would jump
-// the song; 1000 leaves generous room for a genuinely slow frame while still
-// catching a real discontinuity. See the long comment in clock.c.
-#define RB_CLOCK_MAX_STEP_MS 1000
+// The clock's tick interval, and therefore its resolution. 10ms is well inside
+// the 45ms Perfect window while keeping the wakeup rate sane. Timestamps
+// quantise to this -- a bounded, predictable error, unlike the once-a-second
+// 1000ms lurch the previous time_ms()-derived clock produced. See clock.c.
+#define RB_CLOCK_TICK_MS 10
+
+// How far the clock may disagree with the whole-second field before its rate is
+// trimmed. Must exceed 1000: the seconds field is quantised to whole seconds, so
+// the clock legitimately sits up to a second either side of it. 1200 leaves
+// ~200ms of genuine error tolerance.
+#define RB_CLOCK_SYNC_SLACK_MS 1200
+
+// Wait this long before trusting the measured tick rate. `coarse` is quantised
+// to whole seconds, so a shorter window would calibrate against up to 1s of
+// quantisation error.
+#define RB_CLOCK_CAL_MIN_MS 3000
+
+// Sanity bounds on the measured tick period. A 10ms request fires at ~14ms on
+// the emulator; these bounds allow for far worse without letting a bad reading
+// run the clock away.
+#define RB_CLOCK_TICK_MIN_MS 4
+#define RB_CLOCK_TICK_MAX_MS 40
 
 // ---------------------------------------------------------------------------
 // Feedback
@@ -107,7 +134,9 @@
 // frame counter, so it is deterministic.
 #define RB_FLASH_MS 150
 
-#define RB_MAX_NOTES 96
+// The charted excerpt has 288 notes; the pool leaves room to re-generate a
+// denser one without touching code. Costs one byte of RAM per note.
+#define RB_MAX_NOTES 320
 
 // ---------------------------------------------------------------------------
 // Haptics
@@ -122,15 +151,17 @@
 // at the wrist at all. 45 is the shortest that reads as a distinct tap.
 #define RB_VIBE_NORMAL_MS 45
 
-// Clearly heavier than a normal tap, still well under the 250ms gap between
-// consecutive eighth notes at 120 BPM. Pebble vibration is coarse on/off with no
+// Clearly heavier than a normal tap, still under the 333ms gap between
+// consecutive eighth notes at 90 BPM. Pebble vibration is coarse on/off with no
 // amplitude control, so pulse LENGTH is the only lever for "harder".
 #define RB_VIBE_BIG_MS 120
 
 // Minimum spacing between normal pulses: pattern length plus spin-down plus
 // margin. Below this the motor never fully stops and separate hits smear into
-// one continuous buzz, losing the per-note feel. The demo chart's tightest
-// spacing is 250ms, so every note still gets its own clean pulse.
+// one continuous buzz, losing the per-note feel. The charted excerpt places
+// notes as little as 167ms apart across lanes, so on the densest runs some
+// pulses are deliberately skipped -- that is the drop being made predictable
+// rather than left to the SDK.
 #define RB_VIBE_MIN_GAP_MS 130
 
 // ---------------------------------------------------------------------------
@@ -147,9 +178,31 @@
 #define RB_AUDIO_RATE_HZ 16000
 #define RB_AUDIO_VOLUME 70
 
-// Samples rendered per pump, ceiling. 40ms at 16kHz; one frame is 33ms, so this
-// covers a frame plus a late one without ever needing two writes.
-#define RB_AUDIO_CHUNK_SAMPLES 640
+// MEASURED, not documented: speaker_stream_write() accepts at most 512 samples
+// in a single call. Asking for 640 returned exactly 512 every time, on every
+// pump. The SDK says only "may be less if the buffer is full" and gives no size.
+#define RB_AUDIO_WRITE_MAX 512
+
+// Render buffer, one slice at a time.
+#define RB_AUDIO_CHUNK_SAMPLES RB_AUDIO_WRITE_MAX
+
+// Bounded slice count per pump, for when a pump runs late. Not a retry loop: it
+// never spins waiting for space, and anything still unwritten is dropped.
+#define RB_AUDIO_SLICES_PER_PUMP 2
+
+// The pump runs on its OWN timer, not on the render frame.
+//
+// This is not a preference, it is arithmetic. A write accepts at most 512
+// samples (32ms of audio), while a render frame is 33ms and in practice ~37ms.
+// Pumping once per frame therefore delivers at most 512 samples per 37ms =
+// ~13.8k/s against the 16k/s the speaker consumes, so the stream starves no
+// matter how many slices are attempted -- measured as a steady ~10% of audio
+// dropped. At 20ms a pump needs only 320 samples, comfortably under the cap.
+//
+// Decoupling it from the frame rate is also the more honest structure: audio is
+// an independent output, and now its cadence no longer depends on how fast the
+// game happens to be drawing.
+#define RB_AUDIO_PUMP_MS 20
 
 // How far ahead of the clock the stream is kept filled. This IS the audio
 // latency knob: whatever sits queued in the firmware buffer is delay between the
@@ -189,9 +242,38 @@
 #define RB_BIG_KA_MS 160
 
 // Out of 255. Normal leaves headroom so a big note is audibly louder rather than
-// just longer.
-#define RB_ENV_NORMAL 200
-#define RB_ENV_BIG 255
+// just longer. Both were cut from 200/255 once the backing track arrived: the
+// drums now sit ON TOP of music rather than in silence, and at the old levels a
+// don over a loud bar clipped the sum. At 150/200 a single don peaks around 55
+// and a big note around 74, which leaves room beside the ~50 the music occupies.
+#define RB_ENV_NORMAL 150
+#define RB_ENV_BIG 200
+
+// ---------------------------------------------------------------------------
+// Backing music
+//
+// The stage audio is a raw signed-8-bit 8kHz mono PCM resource -- 88s of the
+// source track, 688KB, against emery's 1024KB resource budget. It cannot be an
+// mp3: PebbleOS exposes no decoder, and the Speaker API takes raw PCM only.
+//
+// 8kHz halves the byte rate against the 16kHz mixer and is what makes 88s fit
+// at all; the cost is a 4kHz ceiling, so the track sounds like AM radio. The
+// mixer upsamples 2x with linear interpolation into its 16kHz stream.
+//
+// Music position is derived from the STREAM position, not from a counter of its
+// own -- see audio.c. That is what keeps it locked to the notes, and it means
+// audio still cannot influence the game clock.
+// ---------------------------------------------------------------------------
+
+#define RB_MUSIC_RATE_HZ 16000
+
+// Music starts at the same offset as the first note, so the audio and the chart
+// share one origin. Also gives the player a beat of runway before note one.
+#define RB_MUSIC_START_MS 2000
+
+// Music is halved so the drums cut through it. >>1 rather than a multiply
+// because this runs per sample.
+#define RB_MUSIC_GAIN_SHIFT 1
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -228,7 +310,7 @@
 
 // Start the song immediately instead of showing the title, so the playing and
 // results screens are reachable without a button press.
-#define RB_DEBUG_AUTOSTART 0
+#define RB_DEBUG_AUTOSTART 1
 
 #define RB_DEBUG_AUTOPLAY 0  // auto-hit every note as it reaches its hit time
 

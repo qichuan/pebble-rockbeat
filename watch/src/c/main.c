@@ -235,9 +235,20 @@ static void prv_frame(void *data) {
     // and it is worth confirming rather than assuming.
     static uint32_t s_prev_ms;
     static uint16_t s_frames;
+    static time_t s_wall0;
+    static uint32_t s_clock0;
+    if (s_wall0 == 0) {
+      s_wall0 = time(NULL);
+      s_clock0 = now_ms;
+    }
     if (s_prev_ms != 0 && (++s_frames % 30) == 0) {
-      APP_LOG(APP_LOG_LEVEL_DEBUG, "frame delta=%lums elapsed=%lums",
-              (unsigned long)(now_ms - s_prev_ms), (unsigned long)game_elapsed_ms());
+      // clock vs wall is the one that matters: they must advance together. When
+      // they did not, the song raced ahead of the music and the speaker could
+      // not be fed fast enough. See the rate discipline in clock.c.
+      const long wall_s = (long)(time(NULL) - s_wall0);
+      APP_LOG(APP_LOG_LEVEL_DEBUG, "frame=%lums clock=%lums wall=%lds elapsed=%lums",
+              (unsigned long)(now_ms - s_prev_ms), (unsigned long)(now_ms - s_clock0), wall_s,
+              (unsigned long)game_elapsed_ms());
     }
     s_prev_ms = now_ms;
   }
@@ -274,12 +285,10 @@ static void prv_frame(void *data) {
 
   layer_mark_dirty(s_canvas);
 
-  // Strictly last: after every state mutation and after the redraw request, so
-  // it can neither perturb scoring nor delay a frame. Judgment timestamps come
-  // from the button handler's own clock read, on a different code path
-  // entirely, so audio work cannot affect them under any circumstances.
-  audio_pump(now_ms);
-
+  // No audio work here. The pump runs on its own timer inside audio.c, because
+  // one write per render frame cannot physically keep the stream fed -- see
+  // RB_AUDIO_PUMP_MS. It also means a slow frame can no longer stutter the
+  // music, and audio still cannot influence the clock either way.
   s_timer = app_timer_register(RB_FRAME_MS, prv_frame, NULL);
 }
 
@@ -315,9 +324,16 @@ static void prv_window_disappear(Window *window) {
   prv_timer_stop();
   audio_song_stop();
   feedback_silence();
+  clock_stop();
 }
 
 static void prv_init(void) {
+#if RB_DEBUG_LOG_AUDIO
+  // Sizing data for the "stream the music from the phone instead" question.
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "appmessage max: inbox=%lu outbox=%lu bytes",
+          (unsigned long)app_message_inbox_size_maximum(),
+          (unsigned long)app_message_outbox_size_maximum());
+#endif
   save_load();
   audio_init();
   audio_set_enabled(save_sound_enabled());

@@ -10,7 +10,13 @@
 
 #include <pebble.h>
 
+// Starts the tick that drives the clock.
 void clock_init(void);
 
-// Monotonic milliseconds since clock_init(). Never decreases.
+// Stops the tick. Call when the app leaves the foreground.
+void clock_stop(void);
+
+// Monotonic milliseconds since clock_init(). Never decreases, and advances in
+// even steps -- see the long comment in clock.c for why that evenness is the
+// whole point.
 uint32_t clock_now_ms(void);

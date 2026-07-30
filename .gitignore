@@ -5,3 +5,5 @@ watch/.lock-waf_darwin_build
 
 # OS
 .DS_Store
+
+__pycache__/

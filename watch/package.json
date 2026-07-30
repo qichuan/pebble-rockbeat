@@ -23,6 +23,11 @@
           "type": "png",
           "name": "IMAGE_MENU_ICON",
           "file": "images/menu_icon.png"
+        },
+        {
+          "type": "raw",
+          "name": "MUSIC_PCM",
+          "file": "data/music.pcm"
         }
       ]
     }

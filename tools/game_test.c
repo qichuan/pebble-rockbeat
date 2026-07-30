@@ -99,8 +99,12 @@ static void test_nearest_note_wins(void) {
   const Chart chart = prv_make_chart(notes, 2);
 
   game_start(&chart, 0);
-  // 60ms after the first, 140ms before the second -- the first is nearer.
-  CHECK(prv_hit(RB_LANE_MID, 10060) == RB_JUDGE_GOOD, "expected GOOD on the nearer note");
+  // Just outside Perfect, so the judgment proves which note was chosen. Derived
+  // from the config rather than hardcoded -- a literal here silently changes
+  // meaning the moment the windows are retuned, which is exactly what happened.
+  const uint32_t offset = RB_PERFECT_MS + 10;
+  CHECK(prv_hit(RB_LANE_MID, 10000 + offset) == RB_JUDGE_GOOD,
+        "expected GOOD on the nearer note");
   CHECK(game_note_judgment(0) != RB_JUDGE_NONE, "first note should have been consumed");
   CHECK(game_note_judgment(1) == RB_JUDGE_NONE, "second note should be untouched");
 }
@@ -315,12 +319,15 @@ static void test_builtin_chart_is_valid(void) {
             "chart must be sorted ascending; note %u breaks it", (unsigned)i);
     }
 
-    // Two notes in one lane closer than 2*RB_MISS_MS would have overlapping
-    // judgment windows and could not be hit individually.
+    // THE invariant the generated chart has to respect. Two notes in one lane
+    // closer than 2*RB_MISS_MS have overlapping judgment windows, which means a
+    // single press sits inside both and they stop being individually hittable.
+    // The chart generator enforces one eighth at 90 BPM (333ms) precisely
+    // because it clears this bound.
     if (seen_lane[n->lane]) {
       const uint32_t gap = n->hit_time_ms - last_in_lane[n->lane];
-      CHECK(gap >= 200, "lane %u notes only %lums apart at %lums", (unsigned)n->lane,
-            (unsigned long)gap, (unsigned long)n->hit_time_ms);
+      CHECK(gap > 2 * RB_MISS_MS, "lane %u notes only %lums apart at %lums -- windows overlap",
+            (unsigned)n->lane, (unsigned long)gap, (unsigned long)n->hit_time_ms);
     }
     seen_lane[n->lane] = true;
     last_in_lane[n->lane] = n->hit_time_ms;
