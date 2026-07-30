@@ -42,7 +42,8 @@ static AppTimer *s_tick;
 static uint32_t s_accum_q8;
 static uint32_t s_step_q8;
 static uint32_t s_ticks;
-static time_t s_epoch_s;
+static uint32_t s_ticks_at_boundary;
+static time_t s_last_s;
 static bool s_running;
 
 static void prv_tick(void *data);
@@ -60,47 +61,38 @@ static void prv_tick(void *data) {
   s_accum_q8 += s_step_q8;
   s_ticks++;
 
-  // Self-calibration. The step is NOT assumed to equal RB_CLOCK_TICK_MS: a timer
-  // asked for 10ms does not necessarily fire every 10ms, and on the emery
-  // emulator it actually fires at about 14, which left the clock running 15%
-  // slow when the step was hardcoded.
+  // Measure the tick rate against second BOUNDARIES, not against elapsed time.
   //
-  // So measure it. `coarse` is the elapsed real time from the trustworthy
-  // seconds field, and s_ticks is how many ticks produced it, giving the true
-  // average ms per tick. Averaging since init rather than over a short window
-  // matters because `coarse` is quantised to whole seconds -- that ±1s of
-  // quantisation error is 33% over 3s but under 2% by a minute in, so the
-  // estimate tightens as the song goes on.
+  // The tick period is not RB_CLOCK_TICK_MS: a timer asked for 10ms fires at
+  // ~14ms here, and the true rate changes with load (the title screen runs one
+  // timer, gameplay runs three). So it has to be measured continuously.
   //
-  // The step is only ever adjusted; the counter is never assigned. Monotonicity
-  // is required (a clock that steps backwards drags pending notes back through
-  // their hit windows), and a one-millisecond change of step is imperceptible
-  // where a correction applied to the counter would be exactly the lurch this
-  // design exists to remove.
-  const uint32_t coarse = (uint32_t)(time(NULL) - s_epoch_s) * 1000u;
-  if (coarse >= RB_CLOCK_CAL_MIN_MS && s_ticks > 0) {
-    // +500 because `coarse` floors to whole seconds, so the true elapsed time
-    // sits on average half a second above it. Without that the estimate is
-    // biased low and the clock runs permanently slow.
-    uint32_t measured = ((coarse + 500u) << Q8) / s_ticks;
-
-    const uint32_t lo = (uint32_t)RB_CLOCK_TICK_MIN_MS << Q8;
-    const uint32_t hi = (uint32_t)RB_CLOCK_TICK_MAX_MS << Q8;
-    if (measured < lo) {
-      measured = lo;
-    } else if (measured > hi) {
-      measured = hi;
+  // The subtlety is that time() has one-second resolution. Comparing elapsed
+  // time against the accumulator means comparing against a value quantised to
+  // whole seconds, and every scheme built on that hunted: a cumulative average
+  // could not follow a rate change, and a feedback controller oscillated because
+  // it was chasing up to a second of quantisation noise.
+  //
+  // Counting ticks BETWEEN successive increments of time() sidesteps it
+  // completely. Each increment is an exact one-second boundary, so the count is
+  // an exact ticks-per-second with no quantisation error at all, and it is
+  // re-measured every second so it tracks load changes immediately.
+  //
+  // The step is derived, never the counter assigned, so the clock stays
+  // monotonic -- one that steps backwards would drag pending notes back through
+  // their hit windows.
+  const time_t now_s = time(NULL);
+  if (now_s != s_last_s) {
+    if (s_last_s != 0 && now_s == s_last_s + 1) {
+      const uint32_t ticks = s_ticks - s_ticks_at_boundary;
+      if (ticks >= RB_CLOCK_MIN_TICKS_PER_SEC && ticks <= RB_CLOCK_MAX_TICKS_PER_SEC) {
+        // Smoothed so a single jittery second cannot swing the tempo.
+        const uint32_t measured = (1000u << Q8) / ticks;
+        s_step_q8 = ((s_step_q8 * (RB_CLOCK_SMOOTH - 1)) + measured) / RB_CLOCK_SMOOTH;
+      }
     }
-
-    // Residual offset trim: nudge the rate ~1.5% to pull the clock back toward
-    // real time if it has already drifted, rather than assigning the counter.
-    const uint32_t now_ms = s_accum_q8 >> Q8;
-    if (now_ms > coarse + RB_CLOCK_SYNC_SLACK_MS) {
-      measured -= measured / 64u;
-    } else if (now_ms + RB_CLOCK_SYNC_SLACK_MS < coarse) {
-      measured += measured / 64u;
-    }
-    s_step_q8 = measured;
+    s_last_s = now_s;
+    s_ticks_at_boundary = s_ticks;
   }
 
   prv_schedule();
@@ -110,7 +102,8 @@ void clock_init(void) {
   s_accum_q8 = 0;
   s_step_q8 = (uint32_t)RB_CLOCK_TICK_MS << Q8;
   s_ticks = 0;
-  s_epoch_s = time(NULL);
+  s_ticks_at_boundary = 0;
+  s_last_s = 0;
   s_running = true;
   prv_schedule();
 }

@@ -23,7 +23,7 @@ pebble logs --emulator emery
 pebble kill
 ```
 
-From the repo root: `./tools/run_tests.sh` (expect `OK: 2612 checks passed`).
+From the repo root: `./tools/run_tests.sh` (expect `OK: 2860 checks passed`).
 
 This tool version does **not** accept `--scale`. `--vnc` disables emulator audio.
 
@@ -34,7 +34,7 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 | `rb_config.h` | every tunable constant, with the reasoning for each |
 | `main.c` | window lifecycle, frame timer, the hit path, debug harness |
 | `clock.{c,h}` | self-calibrating tick clock; see the gotcha below |
-| `chart.{c,h}` | chart format, the demo song, forward-compatible loader |
+| `chart.{c,h}` | chart format, the generated song, forward-compatible loader |
 | `game.{c,h}` | song timeline, judgment, score, combo. **No Pebble APIs.** |
 | `render.{c,h}` | all drawing. **The only file with `graphics_*` calls.** |
 | `input.{c,h}` | raw-click handlers producing timestamped hit events |
@@ -64,6 +64,13 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   `RB_DEBUG_FREEZE_AT_MS` to reach any frame with zero presses, and
   `RB_DEBUG_LOG_JUDGMENTS` + `pebble logs` to verify real input (logs survive the
   wedge).
+
+- **`pebble wipe` can leave the emulator permanently unbootable**, and the
+  symptom looks like an app problem: every `install` fails with a libpebble2
+  `TimeoutError`. It is not app size — an 84 KB build failed identically. Recover
+  by deleting **both** `~/Library/Application Support/Pebble SDK/4.17/emery` and
+  `$TMPDIR/pb-emulator.json` (the latter goes stale claiming QEMU is still
+  running), then reinstall.
 
 - **The emulator's first frames after app launch are hundreds of ms apart.** This
   bit twice: it made a naive "stop stepping past the threshold" freeze overshoot
@@ -96,35 +103,59 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   wrapping at 1000. A `s*1000 + ms` clock therefore crawls and then lurches
   ~1010ms once a second, which teleports every note half a screen and makes the
   game unhittable. `clock.c` instead ticks on an AppTimer and uses ONLY the
-  seconds field, to measure what the tick period actually is. Three things are
-  load-bearing: the step is measured not assumed (a 10ms timer fires at ~14ms
-  here); it is held in Q8 fixed point (an integer step cannot express 13.5ms, and
-  rounding is a 4-7% rate error); and only the step is ever adjusted, never the
-  counter, because `clock_now_ms()` must stay monotonic. Do NOT "simplify" this
-  back to `s*1000 + ms`.
+  seconds field, to measure what the tick period actually is. Four things are
+  load-bearing:
+  - The step is **measured, not assumed** — a 10ms timer fires at ~14ms here, and
+    the true rate changes with load (title screen: one timer; gameplay: three).
+  - The rate is measured by **counting ticks between successive increments of
+    `time()`**, never by comparing elapsed time against the accumulator. `time()`
+    has one-second resolution, so any scheme built on elapsed time is chasing up
+    to a second of quantisation noise: a cumulative average could not follow a
+    rate change (settled at 0.82x), and a feedback controller oscillated (1.6x,
+    then 0.66x). Each `time()` increment is an exact one-second boundary, so a
+    tick count between two of them is an exact ticks-per-second with no
+    quantisation error at all.
+  - The step is held in **Q8 fixed point** — an integer step cannot express
+    13.5ms, and rounding is a 4-7% rate error.
+  - **Only the step is ever adjusted, never the counter**, because
+    `clock_now_ms()` must stay monotonic; a clock that steps backwards drags
+    pending notes back through their hit windows.
+
+  Do NOT "simplify" this back to `s*1000 + ms`, and do not re-derive the rate
+  from elapsed time.
 
 - **Two independent things had to be right before the music stayed in sync**: the
   clock above, AND giving the audio pump its own timer. Fixing only one left
   audio dropping. If music stutters, check both.
 
 - **Audio quality is bounded by the output format, not by the source.** The
-  speaker takes 8/16kHz, 8/16-bit PCM. IMA ADPCM was tried to fit a longer
-  excerpt at 16kHz and measured WORSE -- 24.4dB SNR against 37.5dB for plain
-  8-bit -- because it buys bandwidth by spending precision. Do not re-add it.
-  With a fixed byte budget the real choice is length vs bandwidth; the current
-  build spends it on 16kHz and a shorter excerpt.
+  speaker takes 8/16kHz, 8/16-bit PCM. IMA ADPCM was tried, to fit more audio in
+  at 16kHz, and measured WORSE -- 24.4dB SNR against 37.5dB for plain 8-bit --
+  because it buys bandwidth by spending precision, and the output stage is 8-bit
+  anyway. Do not re-add it. With a fixed byte budget the real choice is length vs
+  bandwidth; this build spends it on 16kHz.
 
 - **`sleep N` in a capture script does not reliably reach a given point in the
   song**; use `RB_DEBUG_FREEZE_AT_MS` instead.
 
-- **The chart is generated, not hand-written.** Do not hand-edit the note table
-  in `chart.c` — re-run `tools/make_chart.py`, which also re-cuts the audio from
-  the same excerpt offsets so the two cannot drift apart. It needs numpy (venv)
-  and ffmpeg; neither is needed to build the game.
+- **The chart AND the music are generated from one MIDI file.** Do not hand-edit
+  the note table in `chart.c` — re-run `python3 tools/make_chart.py`, which reads
+  `watch/resources/data/Never-Gonna-Give-You-Up.mid` and writes *both*
+  `chart.c` and `music.pcm` from the same tempo map, so the two cannot drift
+  apart. Stdlib only: no numpy, no ffmpeg, no soundfont, nothing to install.
+  (This replaced an MP3 + spectral-flux onset detector. The MIDI grid is exact
+  where onset detection only approximated it, which is what fixed "the notes
+  don't follow any rhythm".)
 
-- **Resources are 920.8 KB, over the 256 KB app-store limit** (under emery's
+- **`MUSIC_PCM` in `package.json` must point at `music.pcm`, never at the
+  `.mid`.** The watch has no MIDI decoder; `audio.c` opens the stream as
+  `SpeakerPcmFormat_16kHz_8bit` and feeds the resource bytes straight to the
+  speaker, so a `.mid` there plays as static. The `.mid` is generator input only.
+
+- **Resources are 893.9 KB, over the 256 KB app-store limit** (under emery's
   1024 KB sideload budget). The build warns about this every time. Publishing
-  would need a much shorter excerpt or synthesised music.
+  would need a shorter excerpt (drop `BARS` in `make_chart.py`) or on-watch
+  synthesis instead of a streamed render.
 
 - **The back button cannot take a raw, long, or repeating click handler**
   (`pebble.h:97-98`). Single-click only. Fine here — BACK is never gameplay.

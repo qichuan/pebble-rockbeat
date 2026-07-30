@@ -109,22 +109,16 @@
 // 1000ms lurch the previous time_ms()-derived clock produced. See clock.c.
 #define RB_CLOCK_TICK_MS 10
 
-// How far the clock may disagree with the whole-second field before its rate is
-// trimmed. Must exceed 1000: the seconds field is quantised to whole seconds, so
-// the clock legitimately sits up to a second either side of it. 1200 leaves
-// ~200ms of genuine error tolerance.
-#define RB_CLOCK_SYNC_SLACK_MS 1200
+// Sanity bounds on the measured ticks-per-second. A 10ms tick should give ~100;
+// these bounds reject a nonsense reading (a stalled or storming timer) without
+// rejecting the ~70/s the emulator actually delivers.
+#define RB_CLOCK_MIN_TICKS_PER_SEC 12
+#define RB_CLOCK_MAX_TICKS_PER_SEC 400
 
-// Wait this long before trusting the measured tick rate. `coarse` is quantised
-// to whole seconds, so a shorter window would calibrate against up to 1s of
-// quantisation error.
-#define RB_CLOCK_CAL_MIN_MS 3000
-
-// Sanity bounds on the measured tick period. A 10ms request fires at ~14ms on
-// the emulator; these bounds allow for far worse without letting a bad reading
-// run the clock away.
-#define RB_CLOCK_TICK_MIN_MS 4
-#define RB_CLOCK_TICK_MAX_MS 40
+// Smoothing factor for the measured rate: new = (old*(N-1) + measured)/N.
+// 8 settles within a few seconds while stopping one jittery second from audibly
+// swinging the tempo.
+#define RB_CLOCK_SMOOTH 8
 
 // ---------------------------------------------------------------------------
 // Feedback
@@ -310,7 +304,7 @@
 
 // Start the song immediately instead of showing the title, so the playing and
 // results screens are reachable without a button press.
-#define RB_DEBUG_AUTOSTART 1
+#define RB_DEBUG_AUTOSTART 0
 
 #define RB_DEBUG_AUTOPLAY 0  // auto-hit every note as it reaches its hit time
 

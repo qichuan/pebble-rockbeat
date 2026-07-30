@@ -415,6 +415,7 @@ void audio_pump(uint32_t now_ms) {
     prv_render(want);
     prv_mix_music(s_samples_written, want);
     const uint32_t accepted = speaker_stream_write(s_pcm, want);
+    (void)accepted;  // only read by the RB_DEBUG_LOG_AUDIO block below
 
     // BACKPRESSURE: a short write means the buffer is full and those samples
     // are gone. Advance by `want`, NOT by `accepted`.

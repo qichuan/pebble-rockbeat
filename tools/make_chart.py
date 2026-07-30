@@ -1,300 +1,367 @@
 #!/usr/bin/env python3
-"""Generate watch/src/c/chart.c and watch/resources/data/music.pcm from an mp3.
+"""Build the Rockbeat chart and watch-playable PCM from the bundled MIDI file.
 
-    ./venv/bin/python tools/make_chart.py path/to/track.mp3
+    python3 tools/make_chart.py
+    python3 tools/make_chart.py path/to/song.mid
 
-Everything the game plays comes out of this script, so the chart and the audio
-can never drift apart -- both are cut from the same excerpt offsets below.
+Pebble's Speaker API consumes PCM, not MIDI.  This script is intentionally the
+only conversion step: it reads MIDI timing (including tempo changes), creates
+the chart from the drum pattern, and renders a compact 16 kHz PCM backing track
+that audio.c can stream straight from the watch resource.
 
-Why the audio is a raw PCM resource and not the mp3: PebbleOS ships no decoder,
-and the Speaker API accepts raw PCM only (8/16kHz, 8/16-bit, mono). 8kHz 8-bit
-is 8000 bytes/sec, so the 88s excerpt is 688KB against emery's 1024KB resource
-budget. 16kHz would double that and not fit. The cost is a 4kHz ceiling.
-
-Requires numpy and ffmpeg. numpy is not needed to BUILD the game, only to
-re-generate the chart:
-
-    python3 -m venv venv && ./venv/bin/pip install numpy
+It uses only the Python standard library.  In particular, no audio decoder,
+soundfont, or onset detector is involved, so generated notes stay aligned with
+the musical grid instead of merely approximating it from an MP3 waveform.
 """
 
-import os
-import subprocess
+from __future__ import annotations
+
+from array import array
+from collections import defaultdict
+from dataclasses import dataclass
+import math
+from pathlib import Path
+import struct
 import sys
-import wave
 
-import numpy as np
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MIDI = ROOT / "watch/resources/data/Never-Gonna-Give-You-Up.mid"
+CHART_C = ROOT / "watch/src/c/chart.c"
+PCM = ROOT / "watch/resources/data/music.pcm"
 
-# --- Excerpt -----------------------------------------------------------------
-# Bar-aligned window into the source track. 33 bars covering the main peak, the
-# breakdown and the second peak, stopping before the fade-out at ~180s.
-BPM = 90.0
-BEAT_MS = 60000.0 / BPM          # 666.667
-BAR_MS = BEAT_MS * 4
-PHASE_MS = 191.6                 # first downbeat in the source
-START_BAR, END_BAR = 26, 48
-
-# --- Analysis ----------------------------------------------------------------
-SR = 22050
-HOP, WIN = 256, 1024             # 11.6ms resolution
-BANDS = {"low": (0, 200), "mid": (200, 1200), "high": (1200, 11025)}
-LANE_OF_BAND = ["RB_LANE_BOT", "RB_LANE_MID", "RB_LANE_TOP"]  # low/mid/high
-
-# --- Chart -------------------------------------------------------------------
-LEAD_MS = 2000                   # music and first note share this origin
+TICKS_PER_BEAT_REQUIRED = 384
+START_BAR = 12                 # Skip the count-in and begin on a downbeat.
+BARS = 28                      # ~57 seconds at this section's 118 BPM.
+BEATS_PER_BAR = 4
+START_TICK = START_BAR * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+END_TICK = START_TICK + BARS * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+LEAD_MS = 2000
 TAIL_MS = 2500
-
-# Quantise to EIGHTHS (333ms at 90 BPM), not sixteenths.
-#
-# Sixteenths were the original choice and they were a mistake twice over. A
-# sixteenth is 167ms, which at the scroll speed is ~17px of separation -- notes
-# visually collide -- and, more importantly, a grid that fine lets the generator
-# place notes on positions a listener does not hear as the beat, so the chart
-# reads as noise rather than rhythm. On an eighth grid every note lands on a
-# subdivision you can actually feel.
-GRID_DIVISOR = 2                 # 2 = eighths, 4 = sixteenths
-
-SNAP_TOLERANCE_MS = 110          # widened with the coarser grid
-DROP_QUANTILE = 44               # drop the quietest N% of grid slots, per band
-BIG_QUANTILE = 94
-# One eighth at 90 BPM. Must stay above 2 * RB_MISS_MS (320ms) or two notes in a
-# lane get overlapping judgment windows and stop being individually hittable.
-SAME_LANE_MIN_MS = 333
-# Floor on the gap between ANY two notes regardless of lane. Caps the density at
-# ~3.3/s so a loud bar cannot turn into a wall of notes.
-GLOBAL_MIN_MS = 300
-
-# --- Audio encoding ----------------------------------------------------------
-# Raw signed 8-bit PCM at 16kHz.
-#
-# 16kHz rather than 8kHz because 8kHz caps the audio at 4kHz and made the track
-# sound like AM radio. Raw 8-bit rather than compressed because IMA ADPCM was
-# tried and measured worse: at 4 bits/sample it returned 24.4dB SNR against
-# 37.5dB for plain 8-bit on this material. ADPCM buys bandwidth by spending
-# precision, and the speaker output stage is 8-bit anyway, so the trade lost.
-#
-# 16kHz 8-bit is 16000 bytes/sec, which is what forces the excerpt down to ~59s
-# to stay inside emery's 1024KB resource budget. Length was traded for fidelity
-# deliberately.
 MUSIC_RATE = 16000
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WATCH = os.path.join(ROOT, "watch")
+# A sixteenth is used only to collect simultaneous MIDI events.  The actual
+# event time is kept, then spacing rules make the resulting chart playable.
+SLOT_TICKS = TICKS_PER_BEAT_REQUIRED // 4
+SAME_LANE_MIN_MS = 333          # > 2 * RB_MISS_MS
+# Must sit BELOW an eighth note (254ms at 118 BPM) or offbeats are structurally
+# impossible: with 300 here, accepting every beat forbade everything between
+# them, and the chart collapsed to a rigid kick/snare alternation on two lanes
+# with the hi-hat lane completely unused.
+GLOBAL_MIN_MS = 240
 
-CHART_TEMPLATE = '''#include "chart.h"
+# Density ceiling, notes per second. Spacing rules alone would allow ~6/s here,
+# which is the "too fast to hit anything" failure again. Because candidates are
+# taken in weight order, this budget keeps the beats and spends whatever is left
+# on the strongest offbeats, rather than thinning uniformly.
+NOTES_PER_SEC = 2.6
 
-// ---------------------------------------------------------------------------
-// GENERATED FILE -- do not hand-edit. Regenerate with tools/make_chart.py,
-// which also re-cuts watch/resources/data/music.pcm from the same excerpt so the
-// chart and the audio cannot drift apart.
+LANE_NAMES = ("RB_LANE_BOT", "RB_LANE_MID", "RB_LANE_TOP")
+
+
+@dataclass(frozen=True)
+class MidiNote:
+    start: int
+    end: int
+    channel: int
+    pitch: int
+    velocity: int
+
+
+def read_vlq(data: bytes, pos: int) -> tuple[int, int]:
+    value = 0
+    while True:
+        if pos >= len(data):
+            raise ValueError("truncated MIDI variable-length quantity")
+        byte = data[pos]
+        pos += 1
+        value = (value << 7) | (byte & 0x7F)
+        if not byte & 0x80:
+            return value, pos
+
+
+def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote]]:
+    data = path.read_bytes()
+    if data[:4] != b"MThd" or len(data) < 14:
+        raise ValueError(f"{path} is not a Standard MIDI file")
+    header_len = struct.unpack(">I", data[4:8])[0]
+    fmt, tracks, division = struct.unpack(">HHH", data[8:14])
+    if fmt not in (0, 1) or division & 0x8000:
+        raise ValueError("only metrical format-0/1 MIDI files are supported")
+    if division != TICKS_PER_BEAT_REQUIRED:
+        raise ValueError(f"expected {TICKS_PER_BEAT_REQUIRED} ticks/beat, got {division}")
+
+    pos = 8 + header_len
+    tempos = [(0, 500000)]
+    notes: list[MidiNote] = []
+    for _ in range(tracks):
+        if data[pos:pos + 4] != b"MTrk":
+            raise ValueError("missing MIDI track chunk")
+        size = struct.unpack(">I", data[pos + 4:pos + 8])[0]
+        track = data[pos + 8:pos + 8 + size]
+        pos += 8 + size
+        tick = 0
+        cursor = 0
+        running = None
+        active: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+        while cursor < len(track):
+            delta, cursor = read_vlq(track, cursor)
+            tick += delta
+            status = track[cursor]
+            if status < 0x80:
+                if running is None:
+                    raise ValueError("running status without a prior MIDI status")
+                status = running
+            else:
+                cursor += 1
+                if status < 0xF0:
+                    running = status
+            if status == 0xFF:
+                kind = track[cursor]
+                cursor += 1
+                length, cursor = read_vlq(track, cursor)
+                payload = track[cursor:cursor + length]
+                cursor += length
+                if kind == 0x51 and len(payload) == 3:
+                    tempos.append((tick, int.from_bytes(payload, "big")))
+                continue
+            if status in (0xF0, 0xF7):
+                length, cursor = read_vlq(track, cursor)
+                cursor += length
+                continue
+            kind, channel = status & 0xF0, status & 0x0F
+            length = 1 if kind in (0xC0, 0xD0) else 2
+            payload = track[cursor:cursor + length]
+            cursor += length
+            if kind not in (0x80, 0x90) or len(payload) != 2:
+                continue
+            pitch, velocity = payload
+            key = (channel, pitch)
+            if kind == 0x90 and velocity:
+                active[key].append((tick, velocity))
+            elif active[key]:
+                start, start_velocity = active[key].pop(0)
+                notes.append(MidiNote(start, max(start + 1, tick), channel, pitch, start_velocity))
+        # A malformed file with a hanging note should still be audible briefly.
+        for (channel, pitch), values in active.items():
+            notes.extend(MidiNote(start, start + division, channel, pitch, velocity)
+                         for start, velocity in values)
+    tempos.sort()
+    compact_tempos: list[tuple[int, int]] = []
+    for tick, tempo in tempos:
+        if compact_tempos and compact_tempos[-1][0] == tick:
+            compact_tempos[-1] = (tick, tempo)
+        else:
+            compact_tempos.append((tick, tempo))
+    return division, compact_tempos, sorted(notes, key=lambda note: note.start)
+
+
+def make_tick_to_ms(tempos: list[tuple[int, int]], ticks_per_beat: int):
+    anchors: list[tuple[int, float, int]] = []
+    elapsed = 0.0
+    previous_tick, previous_tempo = tempos[0]
+    anchors.append((previous_tick, elapsed, previous_tempo))
+    for tick, tempo in tempos[1:]:
+        elapsed += (tick - previous_tick) * previous_tempo / ticks_per_beat / 1000.0
+        anchors.append((tick, elapsed, tempo))
+        previous_tick, previous_tempo = tick, tempo
+
+    def tick_to_ms(tick: int) -> float:
+        anchor = anchors[0]
+        for candidate in anchors:
+            if candidate[0] > tick:
+                break
+            anchor = candidate
+        anchor_tick, anchor_ms, tempo = anchor
+        return anchor_ms + (tick - anchor_tick) * tempo / ticks_per_beat / 1000.0
+    return tick_to_ms
+
+
+def drum_lane(pitch: int) -> int:
+    if pitch <= 36:             # kick / low tom
+        return 0
+    if pitch <= 41:             # snare / clap / mid tom
+        return 1
+    return 2                    # hi-hat, cymbal, high percussion
+
+
+def drum_weight(note: MidiNote) -> int:
+    # Kick and snare establish the pulse; hats fill it in only if there is room.
+    role_bonus = 48 if note.pitch in (35, 36, 38, 39, 40) else 14
+    return note.velocity + role_bonus
+
+
+def beat_bonus(tick_offset: int) -> int:
+    """Reward notes that land where a listener feels the pulse.
+
+    Without this the chart inverts itself.  Hi-hats occur on every subdivision
+    and outnumber kick and snare several times over, so a selector that walks
+    the song in time order takes a hat on the "and", and the kick 300ms later
+    then fails the spacing rule and is dropped.  Measured on the first attempt:
+    only 19 of 117 notes fell on the four beats, 98 fell between them, and the
+    lane split was 101 hat / 11 snare / 5 kick.  The chart was almost pure
+    filler with the backbone removed.
+    """
+    beat = TICKS_PER_BEAT_REQUIRED
+    bar = beat * BEATS_PER_BAR
+    if tick_offset % bar == 0:
+        return 90                       # bar downbeat -- never drop these
+    if tick_offset % beat == 0:
+        return 70                       # on the beat
+    if tick_offset % (beat // 2) == 0:
+        return 26                       # eighth -- the "and", worth keeping
+    return 0                            # sixteenth filler
+
+
+def build_chart(notes: list[MidiNote], tick_to_ms) -> list[tuple[int, int, int]]:
+    drums = [note for note in notes if note.channel == 9 and START_TICK <= note.start < END_TICK]
+    source = drums or [note for note in notes if START_TICK <= note.start < END_TICK]
+    slots: dict[int, list[MidiNote]] = defaultdict(list)
+    for note in source:
+        slots[round((note.start - START_TICK) / SLOT_TICKS)].append(note)
+
+    candidates: list[tuple[int, int, int, int]] = []
+    for slot in sorted(slots):
+        group = slots[slot]
+        # One intent per rhythmic subdivision.  This prevents simultaneous drum
+        # layers (kick + hat) becoming impossible two-button chords.
+        note = max(group, key=drum_weight)
+        lane = drum_lane(note.pitch) if note.channel == 9 else min(2, max(0, (note.pitch - 36) // 18))
+        time_ms = LEAD_MS + int(round(tick_to_ms(note.start) - tick_to_ms(START_TICK)))
+        offset = note.start - START_TICK
+        downbeat = offset % (TICKS_PER_BEAT_REQUIRED * BEATS_PER_BAR) == 0
+        big = int(downbeat or note.velocity >= 116)
+        candidates.append((time_ms, lane, big, drum_weight(note) + beat_bonus(offset)))
+
+    # Select by musical importance, NOT in time order.
+    #
+    # Spacing rules mean accepting one note forbids others nearby, so whoever is
+    # considered first wins. Walking the song chronologically hands that priority
+    # to whatever happens to come first -- usually a hi-hat -- and the kick or
+    # snare right after it gets refused. Sorting by weight first means the pulse
+    # is laid down before filler is allowed to compete for the same space.
+    #
+    # The preferred lane is honoured strictly rather than falling back to a
+    # neighbour: the lane mapping is the thing that makes the chart readable as
+    # the drum part, and a kick relocated to the hi-hat lane to dodge a spacing
+    # rule is worse than no note at all.
+    span_ms = max(c[0] for c in candidates) - min(c[0] for c in candidates)
+    budget = max(1, int(NOTES_PER_SEC * span_ms / 1000.0))
+
+    chosen: list[tuple[int, int, int]] = []
+    for time_ms, lane, big, _weight in sorted(candidates, key=lambda c: -c[3]):
+        if len(chosen) >= budget:
+            break
+        if any(abs(time_ms - t) < GLOBAL_MIN_MS for t, _l, _b in chosen):
+            continue
+        if any(abs(time_ms - t) < SAME_LANE_MIN_MS for t, l, _b in chosen if l == lane):
+            continue
+        chosen.append((time_ms, lane, big))
+
+    chart = sorted(chosen)
+    if not chart:
+        raise ValueError("no playable notes found in selected MIDI section")
+    return chart
+
+
+def midi_hz(pitch: int) -> float:
+    return 440.0 * 2.0 ** ((pitch - 69) / 12.0)
+
+
+def render_pcm(notes: list[MidiNote], tick_to_ms) -> float:
+    """Render a deliberately small General-MIDI-ish backing track to signed PCM."""
+    start_ms, end_ms = tick_to_ms(START_TICK), tick_to_ms(END_TICK)
+    samples = int(round((end_ms - start_ms) * MUSIC_RATE / 1000.0))
+    mix = array("h", [0]) * samples
+    for note in notes:
+        if not START_TICK <= note.start < END_TICK:
+            continue
+        start = int(round((tick_to_ms(note.start) - start_ms) * MUSIC_RATE / 1000.0))
+        duration_ms = tick_to_ms(note.end) - tick_to_ms(note.start)
+        if note.channel == 9:
+            length = min(int(MUSIC_RATE * 0.16), max(250, int(duration_ms * MUSIC_RATE / 1000.0)))
+        else:
+            length = min(int(MUSIC_RATE * 0.34), max(500, int(duration_ms * MUSIC_RATE / 1000.0)))
+        length = min(length, samples - start)
+        if length <= 0:
+            continue
+        amplitude = 10 + note.velocity // 7
+        if note.channel == 9:
+            # Deterministic noise with a quick exponential fade reads well on
+            # the tiny speaker and keeps percussion recognisable.
+            state = (note.start * 1103515245 + note.pitch * 12345) & 0x7fffffff
+            for offset in range(length):
+                state = (state * 1103515245 + 12345) & 0x7fffffff
+                envelope = (length - offset) / length
+                value = int((((state >> 16) & 0xFF) - 128) * amplitude * envelope / 128)
+                mix[start + offset] += value
+        else:
+            phase_step = 2.0 * math.pi * midi_hz(note.pitch) / MUSIC_RATE
+            for offset in range(length):
+                envelope = 1.0 - offset / length
+                value = int(math.sin(offset * phase_step) * amplitude * envelope)
+                mix[start + offset] += value
+    output = bytearray(samples)
+    for index, value in enumerate(mix):
+        output[index] = (max(-127, min(127, value // 2)) + 256) & 0xFF
+    PCM.write_bytes(output)
+    return samples / MUSIC_RATE
+
+
+def write_chart(chart: list[tuple[int, int, int]], duration_s: float, tick_to_ms) -> None:
+    rows = "\n".join(
+        f"  {{ {time_ms:6d}, {LANE_NAMES[lane]:12s}, "
+        f"{'RB_NOTE_BIG   ' if big else 'RB_NOTE_NORMAL'} }},"
+        for time_ms, lane, big in chart)
+    bpm = round(60000 / (tick_to_ms(START_TICK + TICKS_PER_BEAT_REQUIRED)
+                         - tick_to_ms(START_TICK)))
+    end_ms = LEAD_MS + int(round(duration_s * 1000)) + TAIL_MS
+    CHART_C.write_text(f'''#include "chart.h"
+
+// GENERATED FILE -- do not hand-edit. Regenerate with tools/make_chart.py.
 //
-// "Prelude Drive" -- charted from the audio itself, not hand-placed.
+// "Never Gonna Give You Up" is charted directly from MIDI note-on events and
+// tempo messages. The chart uses percussion when present: kick/low drums map
+// to BOTTOM, snare/clap to MIDDLE, and hats/cymbals to TOP. A MIDI sixteenth
+// collects simultaneous layers, then spacing rules retain a playable rhythm.
+// The same MIDI source is rendered to watch/resources/data/music.pcm, so the
+// audio and notes use one tempo map and cannot drift.
 //
-// Source: a remix of Chopin's Prelude Op. 28 No. 4. The stage is a {dur_s:.1f}s
-// excerpt from {start_s:.3f}s to {end_s:.3f}s of the original -- {bars} bars at
-// {bpm} BPM, bar-aligned, taken from the track's sustained high-energy section.
-//
-// The length is set by audio quality, not by musical taste: the excerpt is
-// stored as raw 16kHz 8-bit PCM at 16000 bytes/sec, so ~59s is what fits inside
-// emery's 1024KB resource budget. See tools/make_chart.py.
-//
-// Pipeline: STFT (11.6ms hop) -> positive spectral flux per frequency band,
-// averaged PER BIN and z-scaled -> peak-pick against a moving-average threshold
-// -> tempo by comb-filtering the onset envelope -> snap to {grid_name}.
-//
-// The per-bin normalisation is load-bearing: the treble band has 456 FFT bins
-// against the bass band's 10, so comparing raw summed flux reports "treble" for
-// almost every onset.
-//
-// Lanes follow the dominant band, which is why the chart reads the way the music
-// sounds: bass and kick on BOTTOM, piano body on MIDDLE, melody on TOP. The drop
-// threshold is applied per band rather than globally, otherwise the loudest band
-// crowds the others out and one lane goes nearly unused.
-//
-// {count} notes, {per_sec:.2f}/s. Spacing guarantees: no two notes in the SAME
-// lane within {same_lane}ms (above 2*RB_MISS_MS, so judgment windows can never
-// overlap -- tools/run_tests.sh asserts this), and no two notes at all within
-// {global_min}ms, which caps how dense a loud bar can get.
-// ---------------------------------------------------------------------------
+// {len(chart)} notes, {len(chart) / duration_s:.2f}/s; {duration_s:.1f}s.
 
 static const ChartNote s_demo_notes[] = {{
 {rows}
 }};
 
-// The music resource begins at RB_MUSIC_START_MS, the same offset the first note
-// sits at, so the audio and the chart share one origin.
 static const Chart s_demo_chart = {{
-  .title = "Prelude Drive",
+  .title = "Never Gonna Give You Up",
   .notes = s_demo_notes,
   .note_count = (uint16_t)(sizeof(s_demo_notes) / sizeof(s_demo_notes[0])),
   .bpm = {bpm},
-  .lead_in_ms = {lead},
+  .lead_in_ms = {LEAD_MS},
   .end_ms = {end_ms},
 }};
 
-const Chart *chart_get_builtin(void) {{
-  return &s_demo_chart;
-}}
+const Chart *chart_get_builtin(void) {{ return &s_demo_chart; }}
 
 bool chart_load_from_resource(uint32_t resource_id, Chart *out_chart) {{
-  // Not implemented in v1 -- see the format documented in chart.h. Callers are
-  // expected to fall back to chart_get_builtin().
   (void)resource_id;
   (void)out_chart;
   return false;
 }}
-'''
+''')
 
 
-def decode(mp3, path, rate, fmt, extra=None, ss=None, t=None):
-    cmd = ["ffmpeg", "-y", "-v", "error"]
-    if ss is not None:
-        cmd += ["-ss", f"{ss:.4f}"]
-    if t is not None:
-        cmd += ["-t", f"{t:.4f}"]
-    cmd += ["-i", mp3]
-    if extra:
-        cmd += ["-af", extra]
-    cmd += ["-ac", "1", "-ar", str(rate), "-f", fmt, path]
-    subprocess.run(cmd, check=True)
-
-
-def band_envelopes(x):
-    nfr = (len(x) - WIN) // HOP
-    win = np.hanning(WIN).astype(np.float32)
-    frames = np.lib.stride_tricks.as_strided(
-        x, shape=(nfr, WIN), strides=(x.strides[0] * HOP, x.strides[0])) * win
-    spec = np.abs(np.fft.rfft(frames, axis=1)).astype(np.float32)
-    freqs = np.fft.rfftfreq(WIN, 1.0 / SR)
-    log = np.log1p(spec * 20.0)
-    flux = np.maximum(0.0, np.diff(log, axis=0, prepend=log[:1]))
-
-    out = {}
-    for name, (lo, hi) in BANDS.items():
-        mask = (freqs >= lo) & (freqs < hi)
-        # MEAN per bin, then z-scale. Summing instead would make the comparison
-        # meaningless: the high band has 456 bins against the low band's 10, so
-        # a summed argmax reports "high" for essentially every onset.
-        e = flux[:, mask].mean(axis=1)
-        out[name] = e / (e.std() + 1e-9)
-    return out
-
-
-def main():
-    if len(sys.argv) != 2:
+def main() -> None:
+    if len(sys.argv) > 2:
         sys.exit(__doc__)
-    mp3 = sys.argv[1]
-
-    analysis = os.path.join(ROOT, "tools", "_analysis.wav")
-    decode(mp3, analysis, SR, "wav")
-    with wave.open(analysis, "rb") as w:
-        x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
-    os.remove(analysis)
-
-    bands = band_envelopes(x)
-    low, mid, high = bands["low"], bands["mid"], bands["high"]
-    total = low + mid + high
-    fps = SR / HOP
-
-    # Peak-pick against a moving average so quiet passages still yield onsets
-    # and loud ones do not spray them.
-    w_frames = int(fps * 0.35)
-    movavg = np.convolve(total, np.ones(w_frames) / w_frames, mode="same")
-    thresh = movavg * 1.25 + 0.15 * total.std()
-    cand = np.array([i for i in range(1, len(total) - 1)
-                     if total[i] > thresh[i] and total[i] >= total[i - 1] and total[i] > total[i + 1]])
-    t_ms = cand / fps * 1000.0
-    strength = total[cand]
-    dom = np.stack([low[cand], mid[cand], high[cand]]).argmax(axis=0)
-    print(f"onsets: {len(cand)}  band split low/mid/high = "
-          f"{(dom==0).sum()}/{(dom==1).sum()}/{(dom==2).sum()}")
-
-    start = PHASE_MS + START_BAR * BAR_MS
-    end = PHASE_MS + END_BAR * BAR_MS
-    dur = end - start
-    sel = (t_ms >= start) & (t_ms < end)
-    t_sel, s_sel, d_sel = t_ms[sel], strength[sel], dom[sel]
-
-    grid = BEAT_MS / GRID_DIVISOR
-    slot = np.round((t_sel - start) / grid).astype(int)
-    err = np.abs((t_sel - start) - slot * grid)
-    keep = err < SNAP_TOLERANCE_MS
-    print(f"excerpt {start/1000:.3f}-{end/1000:.3f}s ({dur/1000:.1f}s, {END_BAR-START_BAR} bars); "
-          f"on-grid {keep.sum()}/{len(t_sel)}, median snap {np.median(err[keep]):.1f}ms")
-
-    best = {}
-    for k, s, d in zip(slot[keep], s_sel[keep], d_sel[keep]):
-        if k not in best or s > best[k][0]:
-            best[k] = (s, int(d))
-
-    # Threshold PER BAND, not globally. A single global cut keeps whichever band
-    # happens to be loudest and starves the others -- it produced a 19/46/56 lane
-    # split, leaving the bass lane almost unused. Taking each band's own loudest
-    # onsets keeps all three lanes in play.
-    st_all = np.array([v[0] for v in best.values()])
-    drop_by_band = {}
-    for band in range(3):
-        st_band = np.array([v[0] for v in best.values() if v[1] == band])
-        drop_by_band[band] = (np.percentile(st_band, DROP_QUANTILE)
-                              if len(st_band) else float("inf"))
-    big_above = np.percentile(st_all, BIG_QUANTILE)
-
-    last = {0: -1e9, 1: -1e9, 2: -1e9}
-    last_any = -1e9
-    notes = []
-    for k in sorted(best):
-        s, d = best[k]
-        if s < drop_by_band[d]:
-            continue
-        t = LEAD_MS + k * grid
-        if t - last_any < GLOBAL_MIN_MS:
-            continue
-        # Prefer the dominant band's lane; if it is still inside its judgment
-        # window, move to a neighbour rather than dropping the note. That is what
-        # makes fast passages alternate lanes instead of thinning out.
-        for lane in (d, (d + 1) % 3, (d + 2) % 3):
-            if t - last[lane] >= SAME_LANE_MIN_MS:
-                notes.append((int(round(t)), lane, 1 if s >= big_above else 0))
-                last[lane] = t
-                last_any = t
-                break
-    notes.sort()
-
-    for i in range(1, len(notes)):
-        assert notes[i][0] >= notes[i - 1][0], "chart must be sorted"
-    for lane in range(3):
-        gaps = np.diff([t for t, l, _ in notes if l == lane])
-        assert len(gaps) == 0 or gaps.min() >= SAME_LANE_MIN_MS, f"lane {lane} spacing violated"
-
-    print(f"notes: {len(notes)} ({len(notes)/(dur/1000):.2f}/s), "
-          f"big {sum(n[2] for n in notes)}, lanes " +
-          "/".join(str(sum(1 for n in notes if n[1] == i)) for i in range(3)))
-
-    # The audio excerpt. Compressed and limited before the bit-depth reduction --
-    # 8-bit has ~48dB of range, so without it the quiet breakdown would vanish
-    # into quantisation noise.
-    pcm = os.path.join(WATCH, "resources", "data", "music.pcm")
-    os.makedirs(os.path.dirname(pcm), exist_ok=True)
-    decode(mp3, pcm, MUSIC_RATE, "s8",
-           extra="highpass=f=80,dynaudnorm=f=250:g=5:p=0.9,alimiter=level_in=1:level_out=0.92",
-           ss=start / 1000.0, t=dur / 1000.0)
-    size = os.path.getsize(pcm)
-    print(f"music.pcm: {size/1024:.1f}KB, {size/MUSIC_RATE:.1f}s at {MUSIC_RATE}Hz")
-
-    rows = "\n".join(
-        f"  {{ {t:6d}, {LANE_OF_BAND[l]:12s}, "
-        f"{'RB_NOTE_BIG   ' if b else 'RB_NOTE_NORMAL'} }},"
-        for t, l, b in notes)
-    end_ms = int(LEAD_MS + dur + TAIL_MS)
-    chart_c = os.path.join(WATCH, "src", "c", "chart.c")
-    with open(chart_c, "w") as f:
-        f.write(CHART_TEMPLATE.format(
-            start_s=start / 1000.0, end_s=end / 1000.0, dur_s=dur / 1000.0,
-            bars=END_BAR - START_BAR, bpm=int(BPM), grid_name=
-            {2: "eighths", 4: "sixteenths"}.get(GRID_DIVISOR, f"1/{GRID_DIVISOR}"),
-            count=len(notes), per_sec=len(notes) / (dur / 1000.0),
-            same_lane=SAME_LANE_MIN_MS, global_min=GLOBAL_MIN_MS,
-            rows=rows, lead=LEAD_MS, end_ms=end_ms))
-    print(f"wrote {chart_c} ({len(notes)} notes, end_ms={end_ms})")
+    midi = Path(sys.argv[1]) if len(sys.argv) == 2 else DEFAULT_MIDI
+    ticks_per_beat, tempos, notes = parse_midi(midi)
+    tick_to_ms = make_tick_to_ms(tempos, ticks_per_beat)
+    chart = build_chart(notes, tick_to_ms)
+    duration_s = render_pcm(notes, tick_to_ms)
+    write_chart(chart, duration_s, tick_to_ms)
+    print(f"{midi.name}: {len(notes)} MIDI notes, {len(chart)} chart notes")
+    print(f"wrote {CHART_C} and {PCM} ({PCM.stat().st_size / 1024:.1f} KB, {duration_s:.1f}s)")
 
 
 if __name__ == "__main__":
