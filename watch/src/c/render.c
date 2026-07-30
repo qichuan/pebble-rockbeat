@@ -23,10 +23,25 @@ typedef struct {
   int16_t target_cx;
 } RbLayout;
 
+// Lane bands are sized against a THREE-lane split even though only two lanes
+// are played, and this is deliberate.
+//
+// The whole ergonomic premise is that a lane sits at the vertical position of
+// the button that plays it. The buttons do not move when the game drops a lane:
+// UP, SELECT and DOWN stay where they are on the case, with SELECT on the
+// screen's exact vertical centre. Dividing the playfield by RB_LANE_COUNT
+// instead -- the obvious change -- gives two 90px bands centred at y=69 and
+// y=159, so the SELECT lane would sit 45px BELOW the SELECT button and the game
+// would be pointing at the wrong hardware.
+//
+// So the geometry stays keyed to the button positions, and the space the third
+// lane used to occupy is simply left out of the playfield.
+#define RB_LANE_SLOTS 3
+
 static RbLayout prv_layout(Layer *layer) {
   RbLayout lay;
   lay.bounds = layer_get_bounds(layer);
-  lay.lane_h = (int16_t)((lay.bounds.size.h - RB_HUD_TOP_H - RB_HUD_BOT_H) / RB_LANE_COUNT);
+  lay.lane_h = (int16_t)((lay.bounds.size.h - RB_HUD_TOP_H - RB_HUD_BOT_H) / RB_LANE_SLOTS);
   for (uint8_t i = 0; i < RB_LANE_COUNT; i++) {
     lay.lane_top[i] = (int16_t)(RB_HUD_TOP_H + i * lay.lane_h);
     lay.lane_cy[i] = (int16_t)(lay.lane_top[i] + lay.lane_h / 2);

@@ -159,115 +159,32 @@
 #define RB_VIBE_MIN_GAP_MS 130
 
 // ---------------------------------------------------------------------------
-// Audio -- see audio.c for the synthesis itself
+// Audio -- the note sequencer. See music.h for everything that was measured
+// about speaker_play_tracks(), and audio.c for the chunk chaining.
 //
-// Format is 16kHz 8-bit signed mono:
-//   - 8-bit because the output stage is 8-bit anyway and the speaker's usable
-//     dynamic range is nowhere near 8 bits; it also halves the byte rate.
-//   - 16kHz rather than 8kHz because the "ka" rim click is a noise burst with
-//     real energy well above 4kHz. At 8kHz that folds back as aliasing and the
-//     click loses its snap. 16kHz costs 16 bytes/ms -- trivial against 128KB.
+// There is no PCM synthesis here any more. The music is MIDI played by the
+// watch's own sequencer, and a PCM stream cannot coexist with it -- measured:
+// speaker_stream_open() returns false while tracks are playing. That removed
+// the whole voice pool, the mixer, the pump timer and their constants along
+// with the 911KB PCM resource they existed to mix.
 // ---------------------------------------------------------------------------
 
-#define RB_AUDIO_RATE_HZ 16000
 #define RB_AUDIO_VOLUME 70
 
-// MEASURED, not documented: speaker_stream_write() accepts at most 512 samples
-// in a single call. Asking for 640 returned exactly 512 every time, on every
-// pump. The SDK says only "may be less if the buffer is full" and gives no size.
-#define RB_AUDIO_WRITE_MAX 512
-
-// Render buffer, one slice at a time.
-#define RB_AUDIO_CHUNK_SAMPLES RB_AUDIO_WRITE_MAX
-
-// Bounded slice count per pump, for when a pump runs late. Not a retry loop: it
-// never spins waiting for space, and anything still unwritten is dropped.
-#define RB_AUDIO_SLICES_PER_PUMP 2
-
-// The pump runs on its OWN timer, not on the render frame.
-//
-// This is not a preference, it is arithmetic. A write accepts at most 512
-// samples (32ms of audio), while a render frame is 33ms and in practice ~37ms.
-// Pumping once per frame therefore delivers at most 512 samples per 37ms =
-// ~13.8k/s against the 16k/s the speaker consumes, so the stream starves no
-// matter how many slices are attempted -- measured as a steady ~10% of audio
-// dropped. At 20ms a pump needs only 320 samples, comfortably under the cap.
-//
-// Decoupling it from the frame rate is also the more honest structure: audio is
-// an independent output, and now its cadence no longer depends on how fast the
-// game happens to be drawing.
-#define RB_AUDIO_PUMP_MS 20
-
-// How far ahead of the clock the stream is kept filled. This IS the audio
-// latency knob: whatever sits queued in the firmware buffer is delay between the
-// press and the sound. The goal is a shallow-but-never-empty buffer, not a full
-// one -- so this is one frame of slack, no more.
-#define RB_AUDIO_LEAD_MS 40
-
-// Silence written at stream open so the very first hit cannot underrun.
-#define RB_AUDIO_PRIME_MS 40
-
-// Three lanes at once plus one spare. Static pool; no malloc.
-#define RB_AUDIO_VOICES 4
-
-// phase_inc = freq * 2^32 / RATE. 2^32 / 16000 = 268435.456, so the integer form
-// is off by 1.7e-6 -- about 0.002Hz at 1kHz, inaudible.
-// Overflow check: 4000 * 268435 = 1.07e9, comfortably inside uint32.
-#define RB_PHASE_INC(freq_hz) ((uint32_t)((uint32_t)(freq_hz) * 268435u))
-
-// Voice recipes. Envelopes decay by `env -= env >> SHIFT` per sample, an
-// exponential with a time constant of 2^SHIFT samples. At 16kHz, shift 8 reaches
-// -60dB in ~111ms (the taiko thump) and shift 5 in ~14ms (the rim snap).
-#define RB_DON_F1 180          // low taiko body
-#define RB_DON_F2 270          // 1.5x -- the inharmonic partial that stops it sounding like a test tone
-#define RB_DON_ENV_SHIFT 8
-#define RB_DON_MS 160
-#define RB_KA_F1 900           // rim tone
-#define RB_KA_F2 1350
-#define RB_KA_ENV_SHIFT 7
-#define RB_KA_NOISE_SHIFT 5
-#define RB_KA_MS 90
-#define RB_BIG_DON_F1 150
-#define RB_BIG_DON_F2 225
-#define RB_BIG_DON_ENV_SHIFT 9
-#define RB_BIG_DON_MS 300
-#define RB_BIG_KA_F1 780
-#define RB_BIG_KA_F2 1170
-#define RB_BIG_KA_MS 160
-
-// Out of 255. Normal leaves headroom so a big note is audibly louder rather than
-// just longer. Both were cut from 200/255 once the backing track arrived: the
-// drums now sit ON TOP of music rather than in silence, and at the old levels a
-// don over a loud bar clipped the sum. At 150/200 a single don peaks around 55
-// and a big note around 74, which leaves room beside the ~50 the music occupies.
-#define RB_ENV_NORMAL 150
-#define RB_ENV_BIG 200
-
-// ---------------------------------------------------------------------------
-// Backing music
-//
-// The stage audio is a raw signed-8-bit 8kHz mono PCM resource -- 88s of the
-// source track, 688KB, against emery's 1024KB resource budget. It cannot be an
-// mp3: PebbleOS exposes no decoder, and the Speaker API takes raw PCM only.
-//
-// 8kHz halves the byte rate against the 16kHz mixer and is what makes 88s fit
-// at all; the cost is a 4kHz ceiling, so the track sounds like AM radio. The
-// mixer upsamples 2x with linear interpolation into its 16kHz stream.
-//
-// Music position is derived from the STREAM position, not from a counter of its
-// own -- see audio.c. That is what keeps it locked to the notes, and it means
-// audio still cannot influence the game clock.
-// ---------------------------------------------------------------------------
-
-#define RB_MUSIC_RATE_HZ 16000
+// Which of the 4 tracks is sample-backed. The generator puts percussion last;
+// the other three sound one of the built-in waveforms.
+#define RB_MUSIC_PERC_TRACK 3
 
 // Music starts at the same offset as the first note, so the audio and the chart
 // share one origin. Also gives the player a beat of runway before note one.
 #define RB_MUSIC_START_MS 2000
 
-// Music is halved so the drums cut through it. >>1 rather than a multiply
-// because this runs per sample.
-#define RB_MUSIC_GAIN_SHIFT 1
+// MEASURED: the FIRST speaker_play_tracks() call costs ~200ms before sound
+// appears; chained calls cost nothing (drift over five later chunks was
+// +17/-5/-12/+41/-30ms, i.e. jitter). So the first call is issued this much
+// early. Without it the entire track sits ~200ms -- a fifth of a beat at
+// 118 BPM -- behind the notes, which is inside the Good window but audibly late.
+#define RB_MUSIC_LATENCY_MS 200
 
 // ---------------------------------------------------------------------------
 // Persistence

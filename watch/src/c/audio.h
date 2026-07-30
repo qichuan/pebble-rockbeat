@@ -1,27 +1,33 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// Drum sounds, synthesised into a raw PCM stream the app owns outright.
+// Backing music, played by the watch's note sequencer.
 //
-// Because the app mixes every voice itself into one stream, there is exactly one
-// audio source and preemption cannot happen -- the question of whether one SDK
-// playback call interrupts another never arises. It also means a backing music
-// track would be extra voices in the same mixer rather than a rewrite.
+// The MIDI is parsed at build time into SpeakerNote tracks (see music.h) and
+// handed to speaker_play_tracks() a chunk at a time, each chunk chained from
+// the previous one's finish callback.
 //
-// EVERY function here is fire-and-forget. play_don()/play_ka() are O(1): they
-// claim a voice slot and return, never touching the speaker, never looping,
-// never blocking. Nothing in this module is ever read by the timing or scoring
-// path -- that is what makes the game immune to speaker latency.
+// EVERY function here is fire-and-forget, and nothing in this module is ever
+// read by the timing or scoring path. That is what keeps the game immune to
+// speaker latency: the song clock drives the audio, never the reverse.
 //
-// The whole implementation sits behind PBL_API_EXISTS(speaker_stream_open) and
-// degrades to no-ops, so the game plays and scores identically with no speaker.
+// The module graph enforces it. audio.c does not include clock.h at all -- song
+// time arrives as a parameter, the same discipline game.c follows. So there is
+// no clock for this module to read even by accident, and no way for a slow or
+// stalled speaker to feed back into note timing.
+//
+// There are no reactive hit sounds any more. A PCM stream cannot coexist with
+// the sequencer (speaker_stream_open() returns false while tracks play,
+// measured -- see music.h), so the two are mutually exclusive and the music
+// wins. The drum part is in the music, so the player still hears the beat they
+// are hitting; hit CONFIRMATION is haptics plus the on-screen flash.
+//
+// The whole implementation sits behind the speaker feature macro and degrades
+// to no-ops, so the game plays and scores identically with no speaker at all.
 // ---------------------------------------------------------------------------
 
-#include <pebble.h>
 #include <stdbool.h>
 #include <stdint.h>
-
-#include "chart.h"
 
 void audio_init(void);
 
@@ -31,13 +37,15 @@ bool audio_is_available(void);
 void audio_set_enabled(bool enabled);
 bool audio_is_enabled(void);
 
-void audio_song_start(void);  // opens and primes the stream
-void audio_song_stop(void);   // closes; already-buffered audio still plays out
+// `elapsed_ms` is song time, so this doubles as resume. Resuming mid-chunk
+// waits for the next chunk boundary rather than restarting the current chunk:
+// the sequencer cannot be started from the middle of a chunk, and a few seconds
+// of silence is far better than a few seconds of music against the wrong notes.
+void audio_song_start(uint32_t elapsed_ms);
 
-// MID is the drum head ("don"); TOP and BOTTOM are the rim ("ka") -- the
-// standard taiko centre/rim split.
-void audio_play_lane(uint8_t lane, uint8_t note_type);
+// Releases the music when SONG time reaches its start. Call once per frame
+// from the frame timer, after the game has stepped. Must be song time, not
+// wall time -- see the comment on the implementation.
+void audio_tick(uint32_t elapsed_ms);
 
-// Renders and writes one frame's worth of samples. Call last in the frame, after
-// every state mutation and after layer_mark_dirty().
-void audio_pump(uint32_t now_ms);
+void audio_song_stop(void);

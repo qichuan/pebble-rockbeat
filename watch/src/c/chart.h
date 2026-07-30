@@ -14,11 +14,22 @@
 #include <stdint.h>
 
 // Lane order is the load-bearing part of the whole design: it must match the
-// physical button order down the right edge of the watch.
+// physical button order down the right edge of the watch. Index 0 is topmost,
+// so the enum order IS the on-screen order -- render.c lays the lanes out by
+// walking 0..RB_LANE_COUNT downward, and everything else is sized from
+// RB_LANE_COUNT rather than from the number 3.
+//
+// Two lanes, not three. The DOWN button is deliberately unused for gameplay:
+// two buttons is easier to play, and the game is a two-handed alternation
+// rather than a three-way choice. Dropping BOTTOM rather than MIDDLE keeps the
+// remaining pair adjacent, so the hand does not have to skip over a dead button.
+//
+// Note the knock-on effect documented in tools/make_chart.py: with only two
+// lanes the same-lane spacing rule leaves offbeats nowhere legal to go, so the
+// chart comes out as exactly the beat grid.
 typedef enum {
   RB_LANE_TOP = 0,  // UP button
   RB_LANE_MID,      // SELECT button
-  RB_LANE_BOT,      // DOWN button
   RB_LANE_COUNT,
 } RbLane;
 

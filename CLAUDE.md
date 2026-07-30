@@ -23,7 +23,7 @@ pebble logs --emulator emery
 pebble kill
 ```
 
-From the repo root: `./tools/run_tests.sh` (expect `OK: 2860 checks passed`).
+From the repo root: `./tools/run_tests.sh` (expect `OK: 2651 checks passed`).
 
 This tool version does **not** accept `--scale`. `--vnc` disables emulator audio.
 
@@ -39,7 +39,8 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 | `render.{c,h}` | all drawing. **The only file with `graphics_*` calls.** |
 | `input.{c,h}` | raw-click handlers producing timestamped hit events |
 | `feedback.{c,h}` | hit-flash state and the haptics drop policy |
-| `audio.{c,h}` | PCM voice pool, music streaming, mixer, own pump timer |
+| `audio.{c,h}` | drives the note sequencer; chains music chunks |
+| `music.{c,h}` | GENERATED `SpeakerNote` tables + the measured sequencer limits |
 | `save.{c,h}` | high score and toggles; the only `persist_*` caller |
 
 ## Key constraints & gotchas
@@ -91,11 +92,33 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   initialisation. Never trust `persist_exists()` as proof a key is unset — and
   keep the +1 flag encoding (1 = false, 2 = true) so a zero is distinguishable.
 
-- **Audio is measured, not assumed.** `RB_DEBUG_LOG_AUDIO` logs the
-  `speaker_stream_open` result, the mute/quiet-time state, frame pacing, and any
-  short write. `speaker_stream_write()` accepts at most 512 bytes per call
-  (measured, undocumented) — which is why the pump has its own 20 ms timer rather
-  than running on the render frame.
+- **The music is MIDI played by the watch's note sequencer, not a recording.**
+  `speaker_play_tracks()` takes `SpeakerNote` arrays; `tools/make_chart.py`
+  parses the `.mid` at build time and emits them as `music.c`. This replaced a
+  911 KB PCM resource with ~10 KB of tables — a 90× cut that took total
+  resources from 915,373 bytes to 4,213 and made the app publishable.
+
+- **Everything about the sequencer is measured; the SDK documents almost none of
+  it.** All of this is in `music.h`, and all of it was found the hard way:
+  - `SPEAKER_MAX_NOTES` (256) is a **per-track** cap, not per-call — 4 tracks of
+    128 plays fine.
+  - **Exceeding it faults the app**, it does not return false. The generator
+    refuses to emit an over-long chunk; there is no runtime guard because by
+    then it is too late.
+  - Chaining the next chunk from the finish callback costs **no audible gap**,
+    and drift against the game clock is jitter (+17/−5/−12/+41/−30 ms per 4 s
+    chunk), not a rate error.
+  - The **first** `speaker_play_tracks()` call costs ~200 ms of startup latency
+    that later calls do not — hence `RB_MUSIC_LATENCY_MS`.
+  - **A PCM stream cannot coexist with the sequencer**: `speaker_stream_open()`
+    returns false while tracks play. The music survives (finishes `Done`, not
+    `Preempted`). This is why there are no reactive hit sounds any more — the
+    two audio sources are mutually exclusive and the music won.
+
+- **Measure sequencer timing only after the clock has settled.** The first
+  attempt reported 2–8% drift and looked like a fatal rate error; it was
+  measuring `clock.c` calibrating during its first seconds. Waiting 15 s before
+  sampling turned the same numbers into ±40 ms of jitter.
 
 - **The clock is a self-calibrating tick, and must stay that way.** `time_ms()`
   has one trustworthy half and one useless half on the emulator: the seconds
@@ -124,38 +147,43 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   Do NOT "simplify" this back to `s*1000 + ms`, and do not re-derive the rate
   from elapsed time.
 
-- **Two independent things had to be right before the music stayed in sync**: the
-  clock above, AND giving the audio pump its own timer. Fixing only one left
-  audio dropping. If music stutters, check both.
-
-- **Audio quality is bounded by the output format, not by the source.** The
-  speaker takes 8/16kHz, 8/16-bit PCM. IMA ADPCM was tried, to fit more audio in
-  at 16kHz, and measured WORSE -- 24.4dB SNR against 37.5dB for plain 8-bit --
-  because it buys bandwidth by spending precision, and the output stage is 8-bit
-  anyway. Do not re-add it. With a fixed byte budget the real choice is length vs
-  bandwidth; this build spends it on 16kHz.
-
 - **`sleep N` in a capture script does not reliably reach a given point in the
   song**; use `RB_DEBUG_FREEZE_AT_MS` instead.
 
 - **The chart AND the music are generated from one MIDI file.** Do not hand-edit
-  the note table in `chart.c` — re-run `python3 tools/make_chart.py`, which reads
-  `watch/resources/data/Never-Gonna-Give-You-Up.mid` and writes *both*
-  `chart.c` and `music.pcm` from the same tempo map, so the two cannot drift
-  apart. Stdlib only: no numpy, no ffmpeg, no soundfont, nothing to install.
-  (This replaced an MP3 + spectral-flux onset detector. The MIDI grid is exact
-  where onset detection only approximated it, which is what fixed "the notes
-  don't follow any rhythm".)
+  `chart.c` or `music.c` — both are generated. Re-run `python3
+  tools/make_chart.py`, which reads
+  `watch/resources/data/Never-Gonna-Give-You-Up.mid` and writes both from the
+  same tempo map, so the notes and the music cannot drift apart. Stdlib only: no
+  numpy, no ffmpeg, no soundfont, nothing to install. (This replaced an MP3 +
+  spectral-flux onset detector. The MIDI grid is exact where onset detection only
+  approximated it, which is what fixed "the notes don't follow any rhythm".)
 
-- **`MUSIC_PCM` in `package.json` must point at `music.pcm`, never at the
-  `.mid`.** The watch has no MIDI decoder; `audio.c` opens the stream as
-  `SpeakerPcmFormat_16kHz_8bit` and feeds the resource bytes straight to the
-  speaker, so a `.mid` there plays as static. The `.mid` is generator input only.
+- **Two lanes, and the layout must NOT be divided by `RB_LANE_COUNT`.** The
+  premise is that a lane sits at the vertical position of the button that plays
+  it, and the buttons do not move when a lane is dropped. Splitting the playfield
+  in two gives 90px bands centred at y=69/159, putting the SELECT lane 45px below
+  the SELECT button. `render.c` therefore divides by `RB_LANE_SLOTS` (3) and
+  leaves the bottom band empty. Do not "tidy" that back to `RB_LANE_COUNT`.
 
-- **Resources are 893.9 KB, over the 256 KB app-store limit** (under emery's
-  1024 KB sideload budget). The build warns about this every time. Publishing
-  would need a shorter excerpt (drop `BARS` in `make_chart.py`) or on-watch
-  synthesis instead of a streamed render.
+- **At two lanes the chart is exactly the beat grid, and no generator knob
+  changes that.** A beat is 508ms at 118 BPM, so an eighth offbeat sits 254ms
+  from its neighbours — inside `SAME_LANE_MIN_MS` (333, itself forced by
+  `2 * RB_MISS_MS`) and therefore illegal in its own lane. With three lanes an
+  offbeat could take the third; with two, both are already carrying beat notes,
+  so it is illegal in both. Sweeping `NOTES_PER_SEC` 2.2→3.4 and the beat bonus
+  70→30 produced exactly 112 notes every time. Syncopation needs a third lane or
+  a smaller `RB_MISS_MS`.
+
+- **Split the kit at pitch 38, not 42.** "Membranes vs metal" is the intuitive
+  two-lane split and it fails: kick and snare alternate on every beat, so putting
+  them in the same lane saturates it — measured 112/12. Cutting between kick and
+  snare puts that alternation *across* the lanes: 56/56 and 100% hand
+  alternation.
+
+- **Resources are 4,213 bytes** — the menu icon. The app is now publishable
+  (previously 893.9 KB against the 256 KB store limit). Keep it that way: do not
+  re-add a PCM music resource.
 
 - **The back button cannot take a raw, long, or repeating click handler**
   (`pebble.h:97-98`). Single-click only. Fine here — BACK is never gameplay.
@@ -171,6 +199,11 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 - **The Gothic system fonts have no arrow glyphs.** Lane badges are drawn as
   stacked `graphics_fill_rect` rows, not `▲`/`▼` characters, which render as tofu.
   No `GPath` either — that would mean a heap allocation.
+
+- **Waf can report a successful build having rebuilt nothing**, leaving a stale
+  `.pbw` that installs fine — which looks exactly like a source change having no
+  effect on the emulator. This cost two rounds of debugging a "2-lane change that
+  did not apply". `pebble clean` before concluding anything about the code.
 
 - **`wscript` is the stock SDK default and byte-identical to the sibling repos —
   never edit it.** It already globs `src/c/**/*.c`, so new source files need no

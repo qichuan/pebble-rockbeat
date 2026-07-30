@@ -51,7 +51,7 @@ static void prv_start_song(void) {
   feedback_reset();
   game_start(s_chart, clock_now_ms());
   game_set_screen(RB_SCREEN_PLAYING);
-  audio_song_start();
+  audio_song_start(game_elapsed_ms());
   prv_timer_start();
   layer_mark_dirty(s_canvas);
 }
@@ -79,7 +79,7 @@ static void prv_pause(void) {
 static void prv_resume(void) {
   game_resume(clock_now_ms());
   game_set_screen(RB_SCREEN_PLAYING);
-  audio_song_start();
+  audio_song_start(game_elapsed_ms());
   prv_timer_start();
   layer_mark_dirty(s_canvas);
 }
@@ -95,10 +95,6 @@ static void prv_resume(void) {
 static void prv_lane_hit(uint8_t lane, uint32_t press_now_ms) {
   const ChartNote *note = NULL;
   const RbJudgment judgment = game_judge_hit(lane, press_now_ms, &note);
-
-  // Sound fires for the press itself, hit or miss: a drum makes a noise whether
-  // or not there was a note there. Big notes get the heavier voice.
-  audio_play_lane(lane, (note != NULL) ? note->type : RB_NOTE_NORMAL);
 
   feedback_hit(lane, judgment, note, game_elapsed_ms());
 
@@ -285,10 +281,16 @@ static void prv_frame(void *data) {
 
   layer_mark_dirty(s_canvas);
 
-  // No audio work here. The pump runs on its own timer inside audio.c, because
-  // one write per render frame cannot physically keep the stream fed -- see
-  // RB_AUDIO_PUMP_MS. It also means a slow frame can no longer stutter the
-  // music, and audio still cannot influence the clock either way.
+  // Audio is released against SONG time, never against an AppTimer. The two are
+  // not interchangeable: clock.c spends its first seconds calibrating and loses
+  // ~2s of song time doing it, so a real-time timer set for "1800ms from now"
+  // fires while the song clock still reads ~1300, starting the music most of a
+  // second ahead of the notes it is supposed to accompany.
+  //
+  // Passing elapsed in keeps the one-way dependency intact -- the clock drives
+  // the audio, and audio_tick() only ever reads it.
+  audio_tick(game_elapsed_ms());
+
   s_timer = app_timer_register(RB_FRAME_MS, prv_frame, NULL);
 }
 

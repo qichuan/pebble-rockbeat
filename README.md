@@ -2,16 +2,21 @@
 
 A Taiko-style rhythm game for the Pebble Time 2.
 
-Three horizontal lanes are stacked to match the three physical buttons down the
-right edge of the watch. Notes ("pebbles") scroll left to right toward a fixed
+Horizontal lanes are stacked to match the physical buttons down the right edge
+of the watch. Notes ("pebbles") scroll left to right toward a fixed
 hit target beside the buttons; press that lane's button as a note arrives.
 
 ```
   TOP lane    ->  UP button       (blue)
   MIDDLE lane ->  SELECT button   (red)     <- screen centre, where SELECT is
-  BOTTOM lane ->  DOWN button     (yellow)
+  DOWN        ->  unused          (two lanes, not three)
   BACK        ->  exit            (never used for gameplay)
 ```
+
+Two lanes rather than three: it is easier to play, and it turns the game into a
+two-handed alternation. The lanes keep the exact screen positions they had as
+part of a three-lane layout, because the buttons did not move -- see "Layout"
+below for why that is not the same as splitting the screen in half.
 
 Hits are judged Perfect / Good / Miss on timing accuracy, with a running score
 and combo counter.
@@ -48,13 +53,18 @@ pebble kill                               # stop the emulator
 Note this tool version does **not** accept `--scale`. Add `--vnc` in a headless
 environment — but be aware that disables emulator audio (see below).
 
+**Waf's dependency tracking is not reliable here.** A build can report success
+having rebuilt nothing, leaving a stale `.pbw` that then installs cleanly — which
+looks exactly like a code change having no effect. If a change does not appear on
+the emulator, run `pebble clean` before concluding anything about the code.
+
 ## Testing
 
 The judgment windows, scoring and combo logic are unit-tested on the host, with
 no emulator involved:
 
 ```bash
-./tools/run_tests.sh      # expect: OK: 2860 checks passed
+./tools/run_tests.sh      # expect: OK: 2651 checks passed
 ```
 
 This works because `game.c` and `chart.c` do not include `<pebble.h>` — they are
@@ -139,20 +149,34 @@ pebble-rockbeat/
       render.{c,h}        all drawing; the only file with graphics_* calls
       input.{c,h}         raw-click handlers -> timestamped hit events
       feedback.{c,h}      haptics policy + hit-flash state
-      audio.{c,h}         PCM voice pool, music streaming, mixer, own pump timer
+      audio.{c,h}         drives the note sequencer; chains music chunks
+      music.{c,h}         GENERATED SpeakerNote tables + the measured limits
       save.{c,h}          high score and toggles; the only persist_* caller
     resources/data/
-      Never-Gonna-Give-You-Up.mid   the source of both the chart and the audio
-      music.pcm                     56.9s of 16kHz 8-bit PCM (889.8KB, generated)
-  tools/make_chart.py     regenerates chart.c AND music.pcm from the .mid
+      Never-Gonna-Give-You-Up.mid   the source of BOTH the chart and the music
+  tools/make_chart.py     regenerates chart.c AND music.c from the .mid
 ```
+
+### Why the lanes are not half the screen each
+
+The lane bands are sized against a **three**-lane split even though two lanes are
+played, and `render.c` divides by `RB_LANE_SLOTS` (3) rather than by
+`RB_LANE_COUNT` (2). That looks like a leftover; it is not.
+
+The premise of the whole design is that a lane sits at the vertical position of
+the button that plays it, and **the buttons do not move when the game drops a
+lane**. Dividing the playfield by the lane count gives two 90 px bands centred at
+y=69 and y=159 — so the SELECT lane would sit 45 px below the SELECT button, and
+the game would be pointing at the wrong hardware. Keeping the 60 px bands leaves
+TOP on the UP button and MIDDLE on the screen's exact vertical centre where
+SELECT is, and the bottom third is simply left dark.
 
 ## Controls
 
 | Screen | UP | SELECT | DOWN | BACK |
 |---|---|---|---|---|
 | Title | toggle sound | start the song | toggle haptics | exit the app |
-| Playing | TOP lane | MIDDLE lane | BOTTOM lane | pause |
+| Playing | TOP lane | MIDDLE lane | (unused) | pause |
 | Paused | restart | resume | quit to title | quit to title |
 | Results | to title | to title | to title | to title |
 
@@ -160,10 +184,11 @@ Sound and haptics settings persist, as do the high score and best combo.
 
 ## The song: "Never Gonna Give You Up"
 
-The stage and its backing track are both generated from one MIDI file,
-`watch/resources/data/Never-Gonna-Give-You-Up.mid`.
+The chart and the music are both generated from one MIDI file,
+`watch/resources/data/Never-Gonna-Give-You-Up.mid`. Nothing is hand-placed and
+there is no audio recording anywhere in the project.
 
-**56.9 seconds, 118 BPM, 147 notes (2.58/s), 28 of them big.** A bar-aligned
+**56.9 seconds, 118 BPM, 112 notes (1.97/s), 28 of them big.** A bar-aligned
 28-bar section starting at bar 12, which skips the count-in and begins on a
 downbeat.
 
@@ -174,8 +199,8 @@ per-band flux, peak-picking, comb-filter tempo estimation. It worked in the sens
 that it found onsets, and it still produced a chart the player described as
 following no rhythm at all — because onset detection *infers* a grid that the
 score already states exactly. Tempo came out as an estimate, beat phase as an
-estimate, and per-note band assignment as a guess about which instrument was
-loudest in a frequency range.
+estimate, and per-note instrument assignment as a guess about which frequency
+band was loudest.
 
 MIDI removes all of that inference. Note-on ticks and tempo meta-events give the
 exact grid, and channel 9 identifies the drum kit by name rather than by
@@ -184,47 +209,50 @@ frequency. The whole analysis pipeline was deleted; `make_chart.py` is now
 
 ### How the chart is chosen
 
-Drum notes (MIDI channel 9) in the section are grouped by sixteenth, one note
-kept per group — otherwise simultaneous kick+hat layers become impossible
-two-button chords. Lanes follow the kit, so the chart reads as the drum part:
+Drum notes (MIDI channel 9) are grouped by sixteenth, one kept per group —
+otherwise simultaneous kick+hat layers become impossible two-button chords. Each
+candidate is weighted by velocity, plus a role bonus for kick and snare, plus a
+beat bonus (90 on a bar downbeat, 70 on a beat, 26 on an eighth, 0 on a
+sixteenth). Candidates are then taken in **weight order, not time order**.
 
-| Lane | MIDI pitches | What it is |
-|---|---|---|
-| BOTTOM | ≤ 36 | kick, low tom |
-| MIDDLE | 37–41 | snare, clap, mid tom |
-| TOP | ≥ 42 | hi-hat, cymbal, high percussion |
+Selecting in time order inverts the chart. Spacing rules mean accepting a note
+forbids its neighbours, so whoever is considered first wins — and walking the
+song chronologically hands that priority to whatever comes first, almost always a
+hi-hat, with the kick 300 ms later then failing the spacing rule. Measured on
+that version: **19 of 117 notes on the beat, 98 between them, lanes split 101 hat
+/ 11 snare / 5 kick.** Weight-ordered selection lays the pulse down first.
 
-Each candidate gets a weight: MIDI velocity, plus a role bonus for kick and
-snare, plus a **beat bonus** — 90 on a bar downbeat, 70 on a beat, 26 on an
-eighth, 0 on a sixteenth. Candidates are then taken in **weight order, not time
-order**, subject to three rules: 333 ms minimum in the same lane, 240 ms minimum
-globally, and a ceiling of 2.6 notes/sec.
+#### The two-lane split, and what it costs
 
-Both of those choices are corrections for a specific failure.
+Lanes follow the kit, cutting between **kick and snare**:
 
-**Selecting in time order inverts the chart.** Spacing rules mean accepting a
-note forbids its neighbours, so whoever is considered first wins — and walking
-the song chronologically hands that priority to whatever happens to come first,
-which is almost always a hi-hat. The kick 300 ms later then fails the spacing
-rule and is dropped. Measured on that version: **19 of 117 notes on the beat, 98
-between them, lanes split 101 hat / 11 snare / 5 kick.** Pure filler with the
-backbone removed. Weight-ordered selection lays the pulse down first and lets
-filler compete only for what's left.
+| Lane | Button | MIDI pitches | What it is |
+|---|---|---|---|
+| MIDDLE | SELECT | < 38 | kick, low toms |
+| TOP | UP | ≥ 38 | snare, clap, hats, cymbals |
 
-**Over-correcting is just as bad.** With the global minimum at 300 ms — above an
-eighth at 118 BPM (254 ms) — accepting every beat structurally forbade everything
-between them. The result was 112/112 notes on the beat, a rigid kick/snare
-alternation, and the TOP lane completely unused. Dropping it to 240 ms and
-capping density with a notes-per-second budget instead is what produced the
-shipped chart: **112 on the beat, 35 on the eighth, none off-grid, lanes 56 BOT /
-56 MID / 35 TOP.**
+The intuitive split is membranes vs metal (drums on one lane, cymbals on the
+other). It fails badly: kick and snare alternate on every beat, so putting them
+in the same lane saturates it — measured **112 notes on one lane against 12** on
+the other. Cutting between kick and snare instead puts that alternation *across*
+the lanes, giving **56/56 and 100% hand alternation** — the pattern a drummer
+actually plays.
 
-The 333 ms same-lane rule is not musical — it is deliberately just above
-`2 * RB_MISS_MS` = 320 ms, so no two notes in one lane can ever have overlapping
-judgment windows. `tools/run_tests.sh` asserts that invariant against the shipped
-chart. The preferred lane is honoured strictly rather than relocating a blocked
-note to a neighbour: a kick moved into the hi-hat lane to dodge a spacing rule is
-worse than no note at all.
+**Two lanes also forces the chart to be exactly the beat grid, and no generator
+setting changes that.** A beat here is 508 ms, so an eighth offbeat sits 254 ms
+from the beats either side of it — inside `SAME_LANE_MIN_MS` (333 ms) and
+therefore illegal in its own lane. With three lanes an offbeat could take the
+third lane; with two, both are already carrying beat notes, so it is illegal in
+both. Once all 112 beats of the section are placed, nothing else fits anywhere:
+sweeping `NOTES_PER_SEC` from 2.2 to 3.4 and the beat bonus from 70 to 30
+produced **exactly 112 notes every time**.
+
+So the two-lane chart is fully alternating and easy to play, but has no
+syncopation available. Getting offbeats back needs either a third lane or a
+smaller `RB_MISS_MS` — which is what sets the 333 ms floor, via the rule that two
+notes in a lane must never have overlapping judgment windows
+(`2 * RB_MISS_MS` = 320). `tools/run_tests.sh` asserts that invariant against the
+shipped chart.
 
 ### Regenerating
 
@@ -233,10 +261,10 @@ python3 tools/make_chart.py                     # uses the bundled .mid
 python3 tools/make_chart.py path/to/song.mid    # any 384-tick/beat format 0/1 SMF
 ```
 
-That writes **both** `watch/src/c/chart.c` and
-`watch/resources/data/music.pcm` from the same tempo map, so the notes and the
-audio cannot drift apart. `chart.c` is generated — do not hand-edit it. Section
-and density live at the top of the script (`START_BAR`, `BARS`, `NOTES_PER_SEC`).
+That writes **both** `watch/src/c/chart.c` and `watch/src/c/music.c` from the
+same tempo map, so the notes and the music cannot drift apart. Both are generated
+— do not hand-edit either. Section and density live at the top of the script
+(`START_BAR`, `BARS`, `NOTES_PER_SEC`).
 
 Charts are `{ hit_time_ms, lane, type }` arrays sorted ascending by time. The
 loader is written so a chart can later come from a resource file instead of being
@@ -246,42 +274,73 @@ intended binary layout is documented at the top of `chart.h`.
 
 ## How the music plays
 
-**PebbleOS has no audio decoder and no MIDI synthesiser**, and the Speaker API
-accepts raw PCM only (8/16 kHz, 8/16-bit, mono). The `.mid` therefore cannot be
-shipped as the playable asset — it is generator *input*. `make_chart.py`
-synthesises it to **raw signed 8-bit 16 kHz mono PCM** (sine tones for pitched
-channels, seeded noise bursts for percussion, linear decay on both), and that
-file is stored as a `raw` resource and streamed a frame at a time with
-`resource_load_byte_range()`. Only a few hundred bytes are ever in RAM; the
-889.8 KB of audio stays in flash. Source and stream run at the same rate, so
-there is no resampling in the mixer.
+The watch has no MIDI file parser — but it does have a **note sequencer**.
+`speaker_play_tracks()` takes arrays of `SpeakerNote {midi_note, waveform,
+duration_ms, velocity}` across up to 4 parallel monophonic tracks. So the MIDI is
+parsed at build time and emitted as those arrays in `music.c`. The watch plays
+notes; it does not play a recording.
 
-> ⚠️ `MUSIC_PCM` in `package.json` must point at `music.pcm`, never at the
-> `.mid`. `audio.c` feeds the resource bytes straight to the speaker, so a `.mid`
-> there plays as static.
+That is worth about 90×:
 
-**Bandwidth was chosen over length.** At 16 kHz, 8-bit the rate is 16000 bytes/s,
-so 56.9 s costs 889.8 KB of emery's **1024 KB**. An earlier build ran twice as
-long at 8 kHz for the same size, but 8 kHz caps the audio at 4 kHz and it sounded
-like AM radio.
+| | bytes |
+|---|---|
+| previous build: pre-rendered 16 kHz PCM resource | 911,160 |
+| now: note tables + one drum sample | ~10,100 |
 
-**IMA ADPCM was tried and rejected.** At 4 bits/sample it would have bought
-16 kHz *and* double the length at the same file size. Measured against the
-source it returned **24.4 dB SNR versus 37.5 dB for plain 8-bit** — ADPCM buys
-bandwidth by spending precision, and since the speaker's output stage is 8-bit
-anyway the trade lost. The code was removed rather than kept as dead weight.
+Total app resources went from **915,373 bytes to 4,213** — which takes the build
+from three and a half times over the 256 KB app-store limit to comfortably under
+it. The old build could not have been published at all.
 
-> ⚠️ **The build prints a resource-size warning**: 893.9 KB exceeds the 256 KB
-> **app-store** limit (total resources 915,373 bytes). It installs and runs fine
-> via `pebble install`, but this build could not be published as-is. A
-> publishable version would need a much shorter section (lower `BARS`) or
-> on-watch synthesis instead of a streamed render.
+Three tracks sound built-in waveforms (triangle bass, square mid, sine lead). The
+fourth is percussion, and it plays a **1.5 KB noise burst pitch-shifted** across
+the kit rather than a pitch, because the four waveforms contain no noise between
+them and a "drum" built from a sine is just a low blip.
 
-Because the app owns one PCM stream and mixes the drums and the music into it
-itself, there is no preemption and no second audio source to keep in step. Music
-position is derived from the **stream position**, which is itself driven by the
-game clock — so the music is locked to the notes by construction, and the
-dependency still runs one way only: audio follows the clock, never the reverse.
+The reduction is lossy by necessity: the section peaks at **14 simultaneous MIDI
+notes against 4 mono tracks**. Splitting by register keeps the bass line and the
+top line intact — the parts that carry the tune — and sacrifices inner harmony
+where it collides.
+
+### Everything below was measured, not documented
+
+The SDK header documents the two cap constants and nothing else. These were found
+with a throwaway spike on the emulator, and two of them are sharp edges:
+
+- `SPEAKER_MAX_NOTES` (256) is a **per-track** cap, not a per-call budget — 4
+  tracks of 128 plays fine.
+- **Exceeding it faults the app**, rather than returning false. The generator
+  refuses to emit an over-long chunk; there is deliberately no runtime guard,
+  because by then it is too late.
+- Chaining the next chunk from the finish callback costs **no audible gap**, and
+  drift against the game clock over six consecutive 4-second chunks was
+  +17/−5/−12/+41/−30 ms — jitter, not a rate error. The music does not walk away
+  from the notes, so no correction is needed.
+- The **first** `speaker_play_tracks()` call costs ~200 ms of startup latency
+  that later calls do not. Hence `RB_MUSIC_LATENCY_MS`: the first call is issued
+  that much early, or the whole track sits a fifth of a beat behind.
+- **A PCM stream cannot coexist with the sequencer.** `speaker_stream_open()`
+  returns false while tracks are playing (the music itself is unharmed — it
+  finishes `Done`, not `Preempted`).
+
+That last one is why **there are no reactive hit sounds any more**. The two audio
+sources are mutually exclusive, so it was music or per-press drum hits, not both.
+The drum part is in the music, so the player still hears the beat they are
+hitting; hit *confirmation* is haptics plus the on-screen flash.
+
+Measuring the sequencer needs one piece of care: sample it only **after the game
+clock has settled**. The first attempt reported 2–8% drift and looked like a
+fatal rate error, but it was measuring `clock.c` calibrating during its first
+seconds. Waiting 15 s before sampling turned the same numbers into ±40 ms of
+jitter.
+
+The music is released against **song time, not an AppTimer**, for the same
+reason. The clock loses ~2 s during its early calibration (verified: the
+clock-to-wall offset climbs to ~2 s over the first 10 s and is then flat for the
+rest of the song), so a real-time timer armed for "1800 ms from now" fires while
+the song clock still reads ~1300 — starting the music the better part of a second
+ahead of its notes, permanently. `audio_tick()` takes elapsed song time as a
+parameter and `audio.c` does not include `clock.h` at all, so the one-way
+dependency is structural: audio follows the clock, never the reverse.
 
 ## Platform
 
@@ -324,8 +383,9 @@ Every SDK call used was checked against the local headers at
 guessed.
 
 **Confirmed present** (emery `pebble.h` line numbers): the Speaker API at
-8463-8628 — including `speaker_stream_open/write/close` at 8592/8598/8601, with
-the symbols genuinely defined in `emery/lib/libpebble.a` (checked with `nm -g`);
+8463-8628 — including `speaker_play_notes/tracks/tone` and
+`speaker_stream_open/write/close`, with the symbols genuinely defined in
+`emery/lib/libpebble.a` (checked with `nm -g`);
 `window_raw_click_subscribe` at 5678; `time_ms` at 8825, **not** deprecated;
 `app_timer_register/reschedule/cancel` at 3016/3023/3028; the `vibes_*` family and
 `VibePattern` at 8430-8459; `quiet_time_is_active` at 8713; `persist_*` at
@@ -333,32 +393,21 @@ the symbols genuinely defined in `emery/lib/libpebble.a` (checked with `nm -g`);
 Emery's 200x228 / 64-colour / 128 KB figures come from
 `common/tools/pebble_sdk_platform.py:133-174`.
 
-**Measured empirically** (the emulator, via `RB_DEBUG_LOG_AUDIO`):
+**Measured empirically** on the emulator — the sequencer behaviour is in "How
+the music plays" above; the short version is that `SPEAKER_MAX_NOTES` is a
+per-track cap, exceeding it faults the app, chunk chaining is gapless, the first
+call costs ~200 ms, and a PCM stream cannot coexist with tracks. Also:
 
-- `speaker_stream_open(SpeakerPcmFormat_16kHz_8bit, 70)` **returns true**, with
-  `speaker_is_muted()` and `quiet_time_is_active()` both false. The real audio
-  path runs; it is not silently falling back to the stub.
-- **`speaker_stream_write()` accepts at most 512 samples per call.** The SDK says
-  only "may be less if the buffer is full" and documents no size. Asking for 640
-  returned exactly 512, every call, every time. This is now `RB_AUDIO_WRITE_MAX`.
-- **That cap forces the pump onto its own timer.** 512 samples is 32 ms of audio
-  while a render frame is 33 ms (~37 ms in practice), so pumping once per frame
-  delivers ~13.8k samples/s against the 16k/s the speaker consumes — the stream
-  starves no matter how many slices are attempted, measured as a steady ~10% of
-  audio dropped. A dedicated 20 ms pump timer (`RB_AUDIO_PUMP_MS`) needs only 320
-  samples per call and brought dropped audio to **zero**.
-- Frame pacing holds at **33–34 ms** against the 33 ms nominal with audio and
-  music running, and dropped audio is zero. (Both the clock rewrite *and* the
-  dedicated pump timer were needed for that; fixing either alone still dropped
-  audio, so if music stutters, check both.)
+- Frame pacing holds at **33–35 ms** against the 33 ms nominal with the music
+  playing, across the full 57-second song with zero playback failures.
 
 **Could not be verified, and how each is handled:**
 
-1. **Whether the 512-sample cap is the true buffer depth or a per-call limit.**
-   Either way the pump is now sized under it. The drop-don't-retry path remains
-   correct to keep: on a short write the remainder is discarded and
-   `s_samples_written` still advances, so the music stays aligned with the notes
-   instead of drifting progressively behind them.
+1. **Whether the ~200 ms first-call latency is constant across hardware.** It is
+   compensated by a single constant (`RB_MUSIC_LATENCY_MS`) measured on the
+   emulator. If the real device differs, the whole track sits uniformly early or
+   late against the notes — audible, but a one-number fix, and it cannot affect
+   scoring, which never reads audio.
 2. **Button-press latency through the firmware.** `ClickHandler` carries **no
    timestamp** (`pebble.h:5211`; the recognizer exposes only button id, click
    count and is-repeating), so the press time is sampled with `time_ms()` as the
@@ -376,7 +425,7 @@ Emery's 200x228 / 64-colour / 128 KB figures come from
    build define — only emery and flint do
    (`pebble_sdk_platform.py:151,190`). On basalt/aplite/chalk/diorite the calls
    are macros expanding to `(0)`. The correct guard is therefore
-   `#if PBL_API_EXISTS(speaker_stream_open)` (`pebble_sdk_version.h:566`), not
+   `#if PBL_API_EXISTS(speaker_play_tracks)` (`pebble_sdk_version.h:566`), not
    `#ifdef PBL_SPEAKER`.
 5. **Emulator audio fidelity.** The emulator passes `-audio driver=coreaudio` on
    macOS but `driver=none` under `--vnc`
@@ -388,11 +437,12 @@ Emery's 200x228 / 64-colour / 128 KB figures come from
    *feel* is a hardware question. Note the SDK behaviour that shapes the design:
    a vibration issued while another is ongoing is *dropped, not queued*, so a
    naive one-pulse-per-hit would silently lose most buzzes on a dense chart.
-7. **How the synthesised drums actually sound.** The emulator routes audio
+7. **How the sequencer's waveforms actually sound.** The emulator routes audio
    through coreaudio, but timbre and volume on a small watch speaker are a
-   hardware property. If the "ka" noise burst does not survive the speaker's
-   roll-off, raise `RB_KA_F1` and lean on the pitch difference from the "don"
-   rather than on the noise.
+   hardware property — and this build leans on it much harder than a recording
+   would, since a square-wave bass and a pitch-shifted noise burst are pure
+   synthesis. The four-voice reduction of a fourteen-voice arrangement is also a
+   musical judgement that only listening on hardware can settle.
 
 ## Emulator quirks worth knowing
 
@@ -419,18 +469,28 @@ Emery's 200x228 / 64-colour / 128 KB figures come from
 
 ## Status
 
-Complete and playable: lanes, the deterministic song clock, scrolling notes,
-button input, judgment, score and combo, on-screen hit feedback, haptics, the
-PCM drum synth, backing music streamed from a resource, a chart generated from
-the same MIDI as that music, and the title / pause / results screens with
-high-score persistence.
+Complete and playable: two lanes, the deterministic song clock, scrolling notes,
+button input, judgment, score and combo, on-screen hit feedback, haptics, backing
+music played by the watch's note sequencer from MIDI, a chart generated from that
+same MIDI, and the title / pause / results screens with high-score persistence.
+
+At **4,213 bytes of resources** the build is now within the app-store limit, which
+the previous PCM-based build (915,373 bytes) was not.
 
 **Not verified on hardware.** Everything above was checked on the emery
 emulator. Haptics in particular cannot be tested there at all — there is no
 motor — and speaker timbre is a hardware property.
 
-Possible next steps: a shorter section or on-watch synthesis so the build fits
-the app-store resource limit; multiple songs (the loader hook and binary format
-are already in `chart.h`); a difficulty selector driven by `NOTES_PER_SEC`; and
-an input-latency calibration screen if hardware testing shows a systematic
-offset.
+Known rough edges, in the order I would fix them:
+
+1. **The two-lane chart has no syncopation** — it is exactly the beat grid, for
+   the structural reason above. A three-lane "hard" mode would restore it, and
+   the generator already supports it.
+2. **No reactive hit sound.** Forced by the sequencer/stream exclusivity, but a
+   very short `speaker_play_tone()` between chunks might fit; it would need
+   measuring against the music, which currently owns the speaker outright.
+3. **The bottom third of the playfield is dark and unused.** Honest, but it looks
+   unfinished; the HUD could expand into it.
+4. Multiple songs (the loader hook and binary format are already in `chart.h`),
+   and an input-latency calibration screen if hardware testing shows a systematic
+   offset.
