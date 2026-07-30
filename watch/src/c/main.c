@@ -282,10 +282,10 @@ static void prv_frame(void *data) {
   layer_mark_dirty(s_canvas);
 
   // Audio is released against SONG time, never against an AppTimer. The two are
-  // not interchangeable: clock.c spends its first seconds calibrating and loses
-  // ~2s of song time doing it, so a real-time timer set for "1800ms from now"
-  // fires while the song clock still reads ~1300, starting the music most of a
-  // second ahead of the notes it is supposed to accompany.
+  // not interchangeable -- song time excludes pauses, and the clock's tick is not
+  // the real-time interval it was asked for -- so a timer set for "1800ms from
+  // now" and a song clock reading 1800 are different moments. Releasing on the
+  // song clock is what makes the music land on the notes rather than near them.
   //
   // Passing elapsed in keeps the one-way dependency intact -- the clock drives
   // the audio, and audio_tick() only ever reads it.

@@ -39,7 +39,12 @@ import struct
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MIDI = ROOT / "watch/resources/data/Never-Gonna-Give-You-Up.mid"
+# The melody-only file written by tools/extract_melody.py, which is now what
+# lives in the repo. Feeding the full arrangement here instead still works and
+# still produces byte-identical output -- the extraction below is idempotent on
+# an already-extracted line -- but the melody file is the one that can be
+# auditioned, so it is the one that is kept.
+DEFAULT_MIDI = ROOT / "watch/resources/data/melody.mid"
 CHART_C = ROOT / "watch/src/c/chart.c"
 MUSIC_C = ROOT / "watch/src/c/music.c"
 
@@ -95,7 +100,17 @@ LANE_NAMES = ("RB_LANE_MID", "RB_LANE_TOP")
 
 TRACKS = 4                      # SPEAKER_MAX_TRACKS
 MAX_NOTES_PER_TRACK = 256       # SPEAKER_MAX_NOTES -- exceeding this FAULTS
-CHUNK_BARS = 4                  # ~8.1s at 118 BPM; keeps each track far under the cap
+MAX_NOTE_MS = 10000             # SDK cap on a single note's duration_ms
+
+# ~16.3s at 118 BPM, and ~120-170 notes per chunk against the 256 cap.
+#
+# Raised from 4 bars because every chunk boundary is a speaker handover, and a
+# handover is neither free nor entirely safe: it is serviced on the app task one
+# frame after the sequencer reports finishing, so it costs a short gap, and it
+# restarts the driver. Halving the number of them (7 chunks -> 4) halves both.
+# Do not raise this much further without checking the note counts printed by
+# this script against MAX_NOTES_PER_TRACK -- going over does not fail, it FAULTS.
+CHUNK_BARS = 8
 
 WAVE_SINE, WAVE_SQUARE, WAVE_TRIANGLE, WAVE_SAWTOOTH = 0, 1, 2, 3
 
@@ -321,15 +336,23 @@ def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to
     return best
 
 
-def extract_melody(notes: list[MidiNote], channel: int) -> list[MidiNote]:
+def extract_melody(notes: list[MidiNote], channel: int,
+                   start_tick: int | None = None,
+                   end_tick: int | None = None) -> list[MidiNote]:
     """Skyline within the chosen channel, forced monophonic.
 
     Where notes overlap, the higher one wins and the lower is dropped rather
     than shortened -- a melody that ducks to an inner voice for 40ms reads as a
     glitch, not as counterpoint.
+
+    The tick range defaults to the charted section, which is what make_chart
+    wants. tools/extract_melody.py passes the whole file instead, so the melody
+    MIDI it writes is a general extraction rather than a 28-bar excerpt.
     """
+    lo = START_TICK if start_tick is None else start_tick
+    hi = END_TICK if end_tick is None else end_tick
     group = sorted((n for n in notes
-                    if n.channel == channel and START_TICK <= n.start < END_TICK),
+                    if n.channel == channel and lo <= n.start < hi),
                    key=lambda n: (n.start, -n.pitch))
     melody: list[MidiNote] = []
     for note in group:
@@ -463,6 +486,19 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
                        int(round(tick_to_ms(nxt) - origin))))
         tick = nxt
 
+    def append_rest(seq, ms: int) -> None:
+        """A rest longer than the SDK's per-note cap has to be split.
+
+        Only rests can get long -- sounding notes are already capped by
+        MAX_SUSTAIN_MS -- but a chunk that opens or closes on a long silence can
+        exceed 10000ms on its own, and a single over-long entry is not something
+        the watch reports, it is something it mis-plays.
+        """
+        while ms > 0:
+            piece = min(ms, MAX_NOTE_MS)
+            seq.append((0, MELODY_WAVE, piece, 0))
+            ms -= piece
+
     chunks = []
     for chunk_start, chunk_end in bounds:
         seq: list[tuple[int, int, int, int]] = []
@@ -475,16 +511,16 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms):
             if end_ms - start_ms < 25:
                 continue
             if start_ms > cursor:
-                seq.append((0, MELODY_WAVE, start_ms - cursor, 0))
+                append_rest(seq, start_ms - cursor)
             sounding = end_ms - start_ms
             if sounding > NOTE_GAP_MS + 25:
                 sounding -= NOTE_GAP_MS
             seq.append((pitch, MELODY_WAVE, sounding, min(MELODY_VELOCITY, velocity)))
             if end_ms - start_ms > sounding:
-                seq.append((0, MELODY_WAVE, (end_ms - start_ms) - sounding, 0))
+                append_rest(seq, (end_ms - start_ms) - sounding)
             cursor = end_ms
         if cursor < chunk_end:
-            seq.append((0, MELODY_WAVE, chunk_end - cursor, 0))
+            append_rest(seq, chunk_end - cursor)
         if len(seq) > MAX_NOTES_PER_TRACK:
             raise ValueError(f"chunk needs {len(seq)} notes, over the "
                              f"{MAX_NOTES_PER_TRACK} cap -- lower CHUNK_BARS")
@@ -587,11 +623,12 @@ def main() -> None:
     chart = build_chart(melody, tick_to_ms)
     chunks, total_ms = build_music(melody, shift, tick_to_ms)
 
-    # duration_ms is uint16 and the SDK caps a note at 10000ms; a chunk-long
-    # rest is the longest value emitted, so checking the chunk covers every note.
-    longest = max(duration for _start, duration, _tracks in chunks)
-    if longest > 10000:
-        raise ValueError(f"chunk of {longest}ms exceeds the 10000ms note cap -- lower CHUNK_BARS")
+    # duration_ms is uint16 and the SDK caps a single note at 10000ms. Long rests
+    # are split to stay under it, so this asserts that splitting actually worked
+    # rather than assuming it -- checking the emitted entries, not the chunk.
+    longest = max(ms for _s, _d, tracks in chunks for seq in tracks for _p, _w, ms, _v in seq)
+    if longest > MAX_NOTE_MS:
+        raise ValueError(f"emitted a {longest}ms entry, over the {MAX_NOTE_MS}ms note cap")
 
     duration_s = total_ms / 1000.0
     note_count = write_music(chunks, total_ms)

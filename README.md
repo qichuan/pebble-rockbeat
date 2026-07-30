@@ -64,7 +64,7 @@ The judgment windows, scoring and combo logic are unit-tested on the host, with
 no emulator involved:
 
 ```bash
-./tools/run_tests.sh      # expect: OK: 2651 checks passed
+./tools/run_tests.sh      # expect: OK: 2187 checks passed
 ```
 
 This works because `game.c` and `chart.c` do not include `<pebble.h>` — they are
@@ -85,49 +85,70 @@ playable and correctly scored with sound muted, disabled, or absent — and is
 immune to speaker latency.
 
 The frame rate does not bound timing precision either. Press timestamps are taken
-inside the button handler, on a different code path from the 30 fps redraw, so a
+inside the button handler, on a different code path from the 25 fps redraw, so a
 late or dropped frame changes what you see but never what you score.
 
 ### The clock
 
-The clock is driven by a **fixed-rate tick timer that calibrates itself**, not by
-`time_ms()`.
+The clock is **real seconds, interpolated by a tick.** Not `time_ms()`, and not a
+free-running timer either.
 
 The obvious implementation — accumulate deltas of `seconds*1000 + ms` — is what
 this project shipped first, and it made the game unplayable. On the emulator
 those two halves disagree (see "Emulator quirks"), so the clock crawled and then
 jumped 1010 ms about once a second. At 95 px/s that teleports every note ~96 px,
-which is why notes appeared at random and could not be hit. Correcting the
-average *rate* did not help: rhythm games are ruined by jitter, not by drift.
+which is why notes appeared at random and could not be hit.
 
-So the time base is an `AppTimer` tick, and the only thing taken from the wall
-clock is the **seconds** field — the half that is trustworthy — used to measure
-what the tick period actually is. Three details matter:
+So the only thing taken from the wall clock is the **seconds** field — the half
+that is trustworthy — and an `AppTimer` tick fills the gap between seconds:
 
-- The step is **measured, not assumed**. A timer asked for 10 ms fires at ~14 ms
-  on the emulator; hardcoding 10 left the clock 15% slow. The real rate also
-  moves with load — the title screen runs one timer, gameplay runs three — so it
-  has to be re-measured continuously rather than calibrated once.
-- The rate is measured by **counting ticks between successive increments of
-  `time()`**, not by comparing elapsed time against the accumulator. This is the
-  detail that took the longest to get right. `time()` has one-second resolution,
-  so every scheme built on elapsed time is comparing against a value quantised to
-  whole seconds, and each one hunted: a cumulative average could not follow a
-  rate change and settled at 0.82×; a feedback controller overshot to 1.6×, then
-  to 0.66× when detuned. Counting between increments sidesteps the problem
-  entirely — each increment is an exact one-second boundary, so the count is an
-  exact ticks-per-second with **no quantisation error at all**, re-measured every
-  second.
-- The step is held in **Q8 fixed point**. An integer step cannot express a true
-  period of ~13.5 ms, and rounding it to 13 or 14 is a 4–7% rate error — a whole
-  beat of drift every twenty seconds.
+```c
+now = base_ms + min(ticks_since_boundary * measured_period, 1000)
+```
 
-The step is only ever adjusted, never the counter, so the clock stays monotonic —
-one that stepped backwards would drag pending notes back through their hit
-windows. Measured after the rewrite: **frame deltas hold steady at 33–34 ms
-against the 33 ms nominal, and dropped audio is zero.** The cost is that
-timestamps quantise to `RB_CLOCK_TICK_MS` (10 ms) — a bounded, predictable error
-well inside the 60 ms Perfect window.
+`base_ms` advances by exactly 1000 on each increment of `time()`. The tick is an
+*interpolator*, and deliberately not an accumulator, which gives three properties
+that are worth more than they look:
+
+- **Error cannot accumulate.** The clock is exact at every second boundary
+  whatever the tick has been doing — no startup transient to converge out of, and
+  no drift over a song of any length.
+- **A bad period estimate is confined to the second it occurs in.** Too high and
+  the interpolation saturates against the clamp; too low and the boundary takes
+  up the slack. Neither leaks into the next second.
+- **Monotonicity is structural, not a rule to be observed.** The clamp is 1000
+  and the next base is exactly 1000 higher, so the clock cannot step backwards —
+  one that did would drag pending notes back through their hit windows.
+
+The period is still measured, by **counting ticks between successive increments
+of `time()`**, never against elapsed time — `time()` has one-second resolution,
+so anything built on elapsed time is chasing up to a second of quantisation
+noise. Each increment is an exact one-second boundary, so a tick count between
+two of them is an exact ticks-per-second with **no quantisation error at all**.
+It is held in **Q8 fixed point**; an integer cannot express a ~10.8 ms period,
+and rounding is a 2–7% error within the second it fills.
+
+#### Two accumulator designs failed here, in opposite directions
+
+Both are worth knowing about, because both look reasonable:
+
+- Correcting only the **rate**, smoothed at 1/8 from a 10 ms seed, took ~25 s to
+  converge and ran ~14% slow throughout — and the time lost on the way was never
+  recovered, because nothing corrected accumulated error.
+- Correcting the **accumulated error** as well moved the failure rather than
+  removing it. A period measured during a slow startup second and applied to a
+  fast one drove the clock to **1.8× for several seconds**. Startup is exactly
+  when the tick rate moves fastest — the frame interval was measured falling
+  69 ms → 37 ms over six seconds — so a predictor is the wrong instrument
+  whatever its gain.
+
+The music is what makes this audible rather than academic: the speaker plays in
+real time and cannot be steered, so every millisecond the clock is wrong is a
+millisecond the music sits away from the notes. See "Keeping the music on the
+notes".
+
+The cost of the whole scheme is that timestamps quantise to `RB_CLOCK_TICK_MS`
+(10 ms) — a bounded, predictable error well inside the 60 ms Perfect window.
 
 ## Layout
 
@@ -143,7 +164,7 @@ pebble-rockbeat/
     src/c/
       rb_config.h         every tunable; no magic numbers in the logic files
       main.c              window lifecycle, frame timer, hit path, debug harness
-      clock.{c,h}         self-calibrating tick clock (see "the clock" below)
+      clock.{c,h}         real seconds interpolated by a tick (see "the clock")
       chart.{c,h}         note-chart format, the generated song, forward-compat loader
       game.{c,h}          song clock, judgment, score, combo -- PEBBLE-FREE
       render.{c,h}        all drawing; the only file with graphics_* calls
@@ -153,8 +174,9 @@ pebble-rockbeat/
       music.{c,h}         GENERATED SpeakerNote tables + the measured limits
       save.{c,h}          high score and toggles; the only persist_* caller
     resources/data/
-      Never-Gonna-Give-You-Up.mid   the source of BOTH the chart and the music
+      melody.mid          the source of BOTH the chart and the music (not bundled)
   tools/make_chart.py     regenerates chart.c AND music.c from the .mid
+  tools/extract_melody.py writes melody.mid from a full arrangement
 ```
 
 ### Why the lanes are not half the screen each
@@ -185,8 +207,8 @@ Sound and haptics settings persist, as do the high score and best combo.
 ## The song: "Never Gonna Give You Up"
 
 The chart and the music are both generated from one MIDI file,
-`watch/resources/data/Never-Gonna-Give-You-Up.mid`. Nothing is hand-placed and
-there is no audio recording anywhere in the project.
+`watch/resources/data/melody.mid`. Nothing is hand-placed and there is no audio
+recording anywhere in the project.
 
 **56.9 seconds, 118 BPM, 89 notes (1.56/s).** A bar-aligned 28-bar section
 starting at bar 12, which skips the count-in and begins on a downbeat.
@@ -230,9 +252,33 @@ invariant against the shipped chart.
 ### Regenerating
 
 ```bash
-python3 tools/make_chart.py                     # uses the bundled .mid
+python3 tools/make_chart.py                     # uses melody.mid
 python3 tools/make_chart.py path/to/song.mid    # any 384-tick/beat format 0/1 SMF
 ```
+
+The input is `watch/resources/data/melody.mid` — the extracted melody, 4,755
+bytes, format 0, channel 0, 538 notes. It is a build input only; it is not in
+`package.json`'s `media[]`, so it does not ship.
+
+To re-derive it from a full arrangement:
+
+```bash
+python3 tools/extract_melody.py path/to/arrangement.mid
+```
+
+**Which input you use makes no audible difference.** `make_chart.py` runs the
+same extraction internally and it is idempotent on an already-extracted line, so
+the full arrangement and `melody.mid` produce byte-identical `chart.c` and
+`music.c` — verified by hashing both. What the melody file buys is
+*inspectability*: it opens in a DAW or any MIDI player, so the extraction can be
+judged on real speakers before it is compiled into the watch app, which is a far
+faster loop than rebuilding to answer "is it picking the right line?".
+
+It is written as **format 0 on channel 0**, the convention most melody tooling
+(including the reference script) expects, so it can be fed onward to other tools.
+Absolute tick positions are preserved rather than re-based to the first note,
+because `make_chart.py` selects its 28-bar section by absolute tick — re-basing
+would silently shift which part of the song gets charted.
 
 That writes **both** `watch/src/c/chart.c` and `watch/src/c/music.c` from the
 same tempo map, so the notes and the music cannot drift apart. Both are generated
@@ -335,27 +381,99 @@ with a throwaway spike on the emulator, and two of them are sharp edges:
 - **Exceeding it faults the app**, rather than returning false. The generator
   refuses to emit an over-long chunk; there is deliberately no runtime guard,
   because by then it is too late.
-- Chaining the next chunk from the finish callback costs **no audible gap**, and
-  drift against the game clock over six consecutive 4-second chunks was
-  +17/−5/−12/+41/−30 ms — jitter, not a rate error.
-- The **first** `speaker_play_tracks()` call costs ~200 ms of startup latency
-  that later calls do not. Hence `RB_MUSIC_LATENCY_MS`.
+- Chunk-to-chunk playback carries **no rate error**: consecutive 8,135 ms chunks
+  came 8073/8186/8103/8193/8083 ms apart on the song clock — ±60 ms of jitter
+  about the right answer.
+- Restarting a chunk **cold**, after the sequencer has idled a couple of hundred
+  ms, is different: it comes back ~200 ms short.
+- **A speaker call from inside the finish callback reboots the watch.** It runs
+  in the driver's context, so `speaker_play_tracks()` from there re-enters the
+  driver that just called you. The emulator is happy to do it; the hardware is
+  not. The callback now only sets a flag and the app task does the work — see
+  below.
+- The **first** `speaker_play_tracks()` call **swallows ~200 ms of the chunk it is
+  given**, rather than costing latency before it. Hence `RB_MUSIC_OFFSET_MS` —
+  and note the sign, discussed below.
 - **A PCM stream cannot coexist with the sequencer.** `speaker_stream_open()`
   returns false while tracks are playing (the music itself is unharmed — it
   finishes `Done`, not `Preempted`). This is why there are no reactive hit
   sounds: the two audio sources are mutually exclusive.
 
-Measuring the sequencer needs one piece of care: sample it only **after the game
-clock has settled**. The first attempt reported 2–8% drift and looked like a
-fatal rate error, but it was measuring `clock.c` calibrating during its first
-seconds. Waiting 15 s turned the same numbers into ±40 ms of jitter.
-
-The music is released against **song time, not an AppTimer**, for the same
-reason. The clock loses ~2 s during early calibration, so a real-time timer armed
-for "1800 ms from now" fires while the song clock still reads ~1300 — starting
-the music the better part of a second ahead of its notes, permanently.
+The music is released against **song time, not an AppTimer**: song time excludes
+pauses and starts where the chart starts, so a chunk armed for a song time is
+released at that point *in the music*, whatever the app has been doing.
 `audio_tick()` takes elapsed song time as a parameter and `audio.c` does not
 include `clock.h` at all, so the one-way dependency is structural.
+
+### Keeping the music on the notes
+
+The chart and the music share a tempo map, and their alignment in the generated
+data is exact — reconstructing the music timeline from `music.c` and comparing it
+against `chart.c` puts all 89 chart notes on a sounding note onset to **0 ms**.
+So a desync is never a data problem, and there are only two things it can be.
+
+Both were present, and the first was much the larger:
+
+**A growing error is the clock.** The song clock advances the notes; the speaker
+plays in real time and cannot be steered. Any difference between those rates
+accumulates. Measured against the old accumulating clock, the music was 1,346 ms
+ahead of the notes by the first chunk boundary and ~2,100 ms by the fourth —
+several beats, and unmistakably what "out of sync" meant. This is fixed in
+`clock.c`, by making real seconds authoritative; it must never be papered over
+with an audio offset.
+
+**A flat error is the offset.** What remained was a constant ~200 ms head start
+from the sequencer eating the top of the first chunk. `RB_MUSIC_OFFSET_MS`
+cancels it, and because the music runs *early* the correction starts it **later**
+— the opposite of a latency compensation. Two earlier builds got this backwards
+with a positive "latency" constant (200 ms, later re-measured as 590 ms); both
+were measuring the clock losing time, not the speaker.
+
+With both fixed, the mean error over a full song is **−21 ms and +25 ms** across
+two runs of the debug harness, and **+1 ms** playing the real title-screen path.
+
+There is also a re-sync guard: at a chunk boundary, if the music has run more
+than `RB_MUSIC_RESYNC_MS` ahead, the next chunk is held until the song clock
+reaches it. Chunk boundaries are the only re-sync points available, because the
+sequencer plays a note list and reports no position. The threshold is 250 ms and
+deliberately well above jitter, because **correcting is not free**: a chunk held
+back is a chunk restarted cold, which costs the ~200 ms above. At 40 ms the guard
+fired at every boundary, each correction causing the cold start that triggered
+the next — a stable limit cycle injecting ~170 ms of silence every 8 seconds.
+Chaining is the good path; this is a guard rail for a real runaway, not the
+mechanism that keeps the music in time.
+
+To re-measure any of this, set `RB_DEBUG_LOG_AUDIO` to 1 and read the `late=`
+figures, which compare when each chunk starts sounding against the song time its
+notes are charted at.
+
+### What the emulator does not show
+
+Two problems appeared only on a real watch, and both came down to the app task
+being a far scarcer resource there than on a desktop emulator.
+
+**The watch rebooted after a while.** Chunks were chained from inside the
+speaker's finish callback, which runs in the driver's own context — so every
+boundary, roughly once per chunk, called back into the driver that had just
+called us. That is a re-entrancy the emulator's implementation shrugs off and
+real firmware does not. The callback now only records what happened; every
+speaker call is made from `audio_tick()` on the app task.
+
+The cost is that a handover waits for the next frame, so boundaries are no longer
+gapless. Measured after the change, sync actually *improved* — the three
+boundaries came in at +33/+17/+10 ms — because a short frame-length gap costs far
+less than the cold-restart penalty a long one does.
+
+**It was laggy.** The clock ticked at 10 ms — 100 app-task wakeups a second — on
+top of a 30 fps full-screen redraw of a 200x228 colour framebuffer. Now 20 ms and
+25 fps. Neither costs timing accuracy: press timestamps come from the click
+handler rather than the frame tick, and the clock's rate comes from real second
+boundaries rather than the tick, so `RB_CLOCK_TICK_MS` sets only how finely the
+gap between seconds is interpolated.
+
+Chunks were also doubled to 8 bars, halving the number of handovers from 7 to 4.
+Check the note counts this script prints against `MAX_NOTES_PER_TRACK` before
+raising it further — going over the 256 cap does not fail, it **faults**.
 
 ## Platform
 
@@ -413,16 +531,19 @@ the music plays" above; the short version is that `SPEAKER_MAX_NOTES` is a
 per-track cap, exceeding it faults the app, chunk chaining is gapless, the first
 call costs ~200 ms, and a PCM stream cannot coexist with tracks. Also:
 
-- Frame pacing holds at **33–35 ms** against the 33 ms nominal with the music
-  playing, across the full 57-second song with zero playback failures.
+- Frame pacing holds against the nominal with the music playing, across the full
+  57-second song with zero playback failures. Note this was measured on the
+  emulator; the frame rate and clock tick were both since reduced because the
+  same build was laggy on a real watch.
 
 **Could not be verified, and how each is handled:**
 
-1. **Whether the ~200 ms first-call latency is constant across hardware.** It is
-   compensated by a single constant (`RB_MUSIC_LATENCY_MS`) measured on the
-   emulator. If the real device differs, the whole track sits uniformly early or
-   late against the notes — audible, but a one-number fix, and it cannot affect
-   scoring, which never reads audio.
+1. **Whether the sequencer's ~200 ms first-call behaviour is the same on
+   hardware.** It is compensated by a single constant (`RB_MUSIC_OFFSET_MS`)
+   measured on the emulator. If the real device differs, the whole track sits
+   uniformly early or late against the notes — audible, but a one-number fix, and
+   it cannot affect scoring, which never reads audio. A *growing* error would be
+   a different fault with a different home: see "Keeping the music on the notes".
 2. **Button-press latency through the firmware.** `ClickHandler` carries **no
    timestamp** (`pebble.h:5211`; the recognizer exposes only button id, click
    count and is-repeating), so the press time is sampled with `time_ms()` as the

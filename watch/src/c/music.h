@@ -24,11 +24,18 @@
 //  * Exceeding it FAULTS the app rather than returning false. The generator
 //    therefore refuses to emit an over-long chunk; nothing here range-checks it
 //    at runtime because by then it is too late.
-//  * Chaining the next chunk from the finish callback costs NO measurable gap.
-//    Drift against the game clock over six 4s chunks was +17/-5/-12/+41/-30ms
-//    -- jitter, not a rate error, so the music does not walk away from the notes.
-//  * The FIRST speaker_play_tracks() call costs ~200ms of startup latency,
-//    which later calls do not. See RB_MUSIC_LATENCY_MS.
+//  * Chaining the next chunk from the finish callback costs NO measurable gap,
+//    and no rate error: consecutive 8135ms chunks came 8073/8186/8103/8193/8083ms
+//    apart on the song clock, which is +-60ms of jitter about the right answer.
+//    The music does not walk away from the notes.
+//  * Restarting a chunk COLD, after the sequencer has been left idle a couple of
+//    hundred ms, is a different matter -- it comes back ~200ms short. So chaining
+//    is the good path and should stay the normal one; see RB_MUSIC_RESYNC_MS for
+//    why a re-sync that fires too eagerly makes the problem it is correcting.
+//  * The FIRST speaker_play_tracks() call SWALLOWS ~200ms of the chunk it is
+//    given, rather than costing latency before it. Every later chunk then
+//    inherits that head start, so the whole song plays early without it. See
+//    RB_MUSIC_OFFSET_MS -- and note the sign, which earlier builds had backwards.
 //  * A PCM stream CANNOT coexist with the sequencer: speaker_stream_open()
 //    returns false while tracks are playing (the music itself survives -- it
 //    finishes with reason Done, not Preempted). This is why the reactive don/ka

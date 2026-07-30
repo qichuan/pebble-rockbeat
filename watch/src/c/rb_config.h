@@ -12,11 +12,16 @@
 // Frame loop
 // ---------------------------------------------------------------------------
 
-// 33ms is ~30fps, the same figure the sibling games settled on. Note that this
-// does NOT bound timing precision: press timestamps come from time_ms() inside
-// the click handler, not from the frame tick, so judgment stays sub-frame
-// accurate even though the picture only moves 30 times a second.
-#define RB_FRAME_MS 33
+// 40ms is 25fps. This does NOT bound timing precision: press timestamps are
+// sampled in the click handler, not on the frame tick, so judgment is unaffected
+// by the redraw rate -- a late or dropped frame changes what is seen, never what
+// is scored.
+//
+// Raised from 33ms (30fps) because the game was laggy on real hardware, where a
+// full-screen redraw of a 200x228 colour framebuffer costs far more than it does
+// on the emulator. At 95px/s a note moves 3.8px per frame, which is still well
+// inside "smooth"; the app task is the scarce resource here, not the eye.
+#define RB_FRAME_MS 40
 
 // ---------------------------------------------------------------------------
 // Vertical layout
@@ -103,22 +108,45 @@
 // Clock
 // ---------------------------------------------------------------------------
 
-// The clock's tick interval, and therefore its resolution. 10ms is well inside
-// the 45ms Perfect window while keeping the wakeup rate sane. Timestamps
-// quantise to this -- a bounded, predictable error, unlike the once-a-second
-// 1000ms lurch the previous time_ms()-derived clock produced. See clock.c.
-#define RB_CLOCK_TICK_MS 10
+// The clock's tick interval, and therefore its resolution. Timestamps quantise
+// to this -- a bounded, predictable error, unlike the once-a-second 1000ms lurch
+// the previous time_ms()-derived clock produced. See clock.c.
+//
+// Raised from 10ms, which asked the app task for 100 wakeups a second on top of
+// the frame timer. That is affordable on the emulator and expensive on a watch,
+// and it showed up as lag. 20ms halves the wakeup rate while staying at a third
+// of the 60ms Perfect window, so the quantisation is still not what limits
+// accuracy -- button travel and dispatch latency are.
+//
+// This is only the INTERPOLATION resolution. It does not affect the clock's rate
+// or its long-run accuracy, both of which come from real second boundaries.
+#define RB_CLOCK_TICK_MS 20
 
-// Sanity bounds on the measured ticks-per-second. A 10ms tick should give ~100;
+// Sanity bounds on the measured ticks-per-second. A 20ms tick should give ~50;
 // these bounds reject a nonsense reading (a stalled or storming timer) without
-// rejecting the ~70/s the emulator actually delivers.
+// rejecting the slower rate the emulator actually delivers under load.
 #define RB_CLOCK_MIN_TICKS_PER_SEC 12
 #define RB_CLOCK_MAX_TICKS_PER_SEC 400
 
-// Smoothing factor for the measured rate: new = (old*(N-1) + measured)/N.
-// 8 settles within a few seconds while stopping one jittery second from audibly
-// swinging the tempo.
+// Smoothing factor for the measured tick period: new = (old*(N-1) + measured)/N.
+// This shapes the interpolation WITHIN a second only -- real second boundaries
+// carry the time, so this no longer has to converge fast enough to stop an error
+// accumulating, because an error can no longer accumulate. 8 keeps one jittery
+// second from visibly swinging the scroll.
 #define RB_CLOCK_SMOOTH 8
+
+// The tick interpolates between real one-second boundaries and may never reach
+// past the one it is filling towards. 1000 is not a tuning choice: it is what
+// makes the clock monotonic by construction, since the next second's base is
+// exactly 1000 higher. Raising it would let the clock overshoot a boundary and
+// then step backwards across it.
+#define RB_CLOCK_MAX_INTERP_MS 1000
+
+// Largest gap in time() that is still treated as elapsed time rather than as the
+// wall clock being stepped. A few seconds means the app was descheduled and the
+// song really has moved on; more than that is an NTP or timezone correction, and
+// following it would teleport every note mid-song.
+#define RB_CLOCK_MAX_GAP_S 5
 
 // ---------------------------------------------------------------------------
 // Feedback
@@ -175,12 +203,60 @@
 // share one origin. Also gives the player a beat of runway before note one.
 #define RB_MUSIC_START_MS 2000
 
-// MEASURED: the FIRST speaker_play_tracks() call costs ~200ms before sound
-// appears; chained calls cost nothing (drift over five later chunks was
-// +17/-5/-12/+41/-30ms, i.e. jitter). So the first call is issued this much
-// early. Without it the entire track sits ~200ms -- a fifth of a beat at
-// 118 BPM -- behind the notes, which is inside the Good window but audibly late.
-#define RB_MUSIC_LATENCY_MS 200
+// Shifts the whole music timeline against the song clock. Positive starts the
+// music LATER; this is the one knob for "the tune does not land on the notes".
+//
+// MEASURED, with the clock in its current form: chained chunks track perfectly.
+// Consecutive boundaries came 8073/8186/8103/8193/8083ms apart against an 8135ms
+// nominal -- +-60ms of jitter and no rate error whatsoever. But the FIRST chunk
+// completes ~200ms sooner than its content should allow, so the sequencer eats
+// about that much while starting up, and because chaining is seamless every
+// later chunk inherits the head start for the rest of the song.
+//
+// The sign is worth being careful about: the music runs EARLY, so the correction
+// starts it LATER. That is the opposite of a latency compensation, and earlier
+// builds got it backwards -- there was a positive 200ms "latency" constant here,
+// later re-measured as 590ms. Both were measuring the song clock losing time to
+// its own calibration rather than anything about the speaker. With the clock
+// fixed, what is left is the speaker's genuine, and negative, startup cost.
+//
+// Method, so it can be repeated: set this to 0, enable RB_DEBUG_LOG_AUDIO, and
+// read the "late=" figures, which compare when each chunk starts sounding
+// against the song time its notes are charted at. Take the mean. A flat error is
+// a constant offset and belongs here; a GROWING one is a rate problem and
+// belongs in clock.c -- do not paper over the second with this.
+//
+// At 200 the mean lateness over two runs was -21ms and +25ms, with a single
+// reproducible +151ms outlier at one boundary. Chasing below ~50ms would be
+// fitting to emulator noise: per-chunk jitter alone is +-60ms.
+//
+// This is an emulator figure. If the music sits consistently ahead of or behind
+// the notes on real hardware, this is the number to re-measure, and the only one.
+#define RB_MUSIC_OFFSET_MS 200
+
+// How far the music may run AHEAD of the song clock before a chunk boundary is
+// used to pull it back. Below this the next chunk is chained immediately, which
+// is gapless; above it the chunk is held until the song clock reaches its start.
+//
+// The music cannot correct itself WITHIN a chunk -- the sequencer plays a note
+// list and reports no position -- so chunk boundaries are the only re-sync
+// points there are, roughly one every 8 seconds.
+//
+// This is deliberately well above the jitter it is meant to ignore, because
+// correcting is NOT free. MEASURED: a chunk chained immediately consumes its
+// nominal duration to within +-60ms, but a chunk started cold, after the
+// sequencer has been left idle for a couple of hundred ms, comes back ~200ms
+// short -- the same startup loss RB_MUSIC_OFFSET_MS exists to cancel.
+//
+// A threshold tight enough to fire on ordinary jitter is therefore self-
+// defeating: it fires at every boundary, each correction causes the cold start
+// that causes the next one, and the result is a stable limit cycle that injects
+// ~170ms of silence every 8 seconds. 40ms did exactly that here.
+//
+// 250ms sits above jitter and below anything a player would hear as out of time
+// (a beat is 508ms at 118 BPM). Chaining stays the normal path; this is a guard
+// rail for a real runaway, not the mechanism that keeps the music in time.
+#define RB_MUSIC_RESYNC_MS 250
 
 // ---------------------------------------------------------------------------
 // Persistence
