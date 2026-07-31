@@ -2,6 +2,8 @@
 
 A Taiko-style rhythm game for the Pebble Time 2.
 
+Download it from [Pebble App Store](https://apps.repebble.com/d562cbb697be4a8faafceeea)
+
 | Pick a song | Play | Results |
 |:---:|:---:|:---:|
 | ![Title screen: the song list with "Never Gonna Give You Up" selected](developer-portal/screenshots/emery/title.png) | ![Gameplay: notes travelling along two coloured lanes toward the target rings](developer-portal/screenshots/emery/game.png) | ![Results screen: rank S, 67450 points, 100% accuracy](developer-portal/screenshots/emery/result.png) |
