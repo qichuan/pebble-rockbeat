@@ -279,6 +279,17 @@
 // the notes on real hardware, this is the number to re-measure, and the only one.
 #define RB_MUSIC_OFFSET_MS 200
 
+// Slack on top of a chunk's own duration before the watchdog in audio_tick()
+// decides the sequencer has stopped and forces the handover itself.
+//
+// Generous on purpose. Everything that legitimately makes a chunk finish late --
+// a resync wait, a slow frame at the release, accumulated drift -- is in the
+// hundreds of ms, and boundary error was measured swinging by ~900ms on a single
+// bad emulator run. Firing on any of those would cut a chunk short for no
+// reason. 3000 is far outside all of it and still turns a permanent silence into
+// one late chunk.
+#define RB_MUSIC_STALL_MS 3000
+
 // How far the music may run AHEAD of the song clock before a chunk boundary is
 // used to pull it back. Below this the next chunk is chained immediately, which
 // is gapless; above it the chunk is held until the song clock reaches its start.
@@ -328,12 +339,22 @@
 // asserted against chart_count() at startup.
 #define RB_MAX_SONGS 8
 
-// Title screen song list. The panel between the header and the two hint lines
-// fits three rows; beyond that the list scrolls around the selection rather than
-// running off the bottom, so adding a fourth song needs no layout change.
-#define RB_TITLE_LIST_Y 74
-#define RB_TITLE_ROW_H 24
-#define RB_TITLE_ROWS 3
+// Title screen song list.
+//
+// Sized so all four songs are visible at once: scrolling a list this short is
+// worse than a slightly tighter row, because a song you cannot see is a song you
+// do not know is there. Beyond RB_TITLE_ROWS the list scrolls around the
+// selection rather than running off the bottom, so a fifth song still works --
+// it just stops being visible all at once.
+//
+// The vertical budget is exact. Panel 26..204 is 178px: header 32, four 21px
+// rows, then the best line, the action hint and the control hint. Changing any
+// of these means re-checking that the last line still lands above 204.
+#define RB_TITLE_PANEL_Y 26
+#define RB_TITLE_PANEL_H 178
+#define RB_TITLE_LIST_Y 62
+#define RB_TITLE_ROW_H 21
+#define RB_TITLE_ROWS 4
 
 // Results ranks, in accuracy percent.
 #define RB_RANK_S_PCT 95

@@ -40,7 +40,11 @@ static uint8_t s_song;
 static volatile bool s_finished;
 static volatile uint8_t s_finish_reason;
 
-static void prv_play_chunk(uint16_t index);
+// Song time by which the playing chunk should have reported finishing. The
+// watchdog in audio_tick() uses it; see the note there.
+static uint32_t s_deadline_ms;
+
+static void prv_play_chunk(uint16_t index, uint32_t elapsed_ms);
 
 // Song time at which a chunk should be handed to the sequencer. One definition,
 // used by both the initial release and the boundary re-anchor, so the two can
@@ -124,7 +128,7 @@ static void prv_handle_finished(uint32_t elapsed_ms) {
 
   const MusicChunk *const next = music_chunk(s_song, s_next_chunk);
   if (next == NULL) {
-    prv_play_chunk(s_next_chunk);  // ends the song and clears the callback
+    prv_play_chunk(s_next_chunk, elapsed_ms);  // ends it, clears the callback
     return;
   }
 
@@ -152,10 +156,10 @@ static void prv_handle_finished(uint32_t elapsed_ms) {
     return;  // audio_tick() releases it when the song clock arrives
   }
 
-  prv_play_chunk(s_next_chunk);
+  prv_play_chunk(s_next_chunk, elapsed_ms);
 }
 
-static void prv_play_chunk(uint16_t index) {
+static void prv_play_chunk(uint16_t index, uint32_t elapsed_ms) {
   const MusicChunk *const chunk = music_chunk(s_song, index);
   if (chunk == NULL) {  // song over
     s_playing = false;
@@ -173,12 +177,29 @@ static void prv_play_chunk(uint16_t index) {
   }
 
   s_next_chunk = (uint16_t)(index + 1);
+
+  // How long this chunk should take, plus slack, in song time. Recomputed from
+  // the CURRENT clock reading rather than from where the chunk was due, so a
+  // late start does not make the watchdog trigger-happy.
+  s_deadline_ms = elapsed_ms + chunk->duration_ms + RB_MUSIC_STALL_MS;
+
   if (!speaker_play_tracks(tracks, count, RB_AUDIO_VOLUME)) {
 #if RB_DEBUG_LOG_AUDIO
     APP_LOG(APP_LOG_LEVEL_DEBUG, "speaker_play_tracks failed at chunk %u", (unsigned)index);
 #endif
-    s_playing = false;
-    speaker_set_finish_callback(NULL, NULL);
+    // Do NOT give up on the song. Failing here used to stop the music for good,
+    // which turns one bad handover into "the second half has no music" -- the
+    // whole remainder lost to a single transient. Skip to the next chunk at its
+    // scheduled time instead, so the cost is one chunk and the music comes back.
+    const MusicChunk *const next = music_chunk(s_song, s_next_chunk);
+    if (next != NULL) {
+      s_armed_chunk = s_next_chunk;
+      s_armed_at_ms = prv_chunk_due_ms(next);
+      s_armed = true;
+    } else {
+      s_playing = false;
+      speaker_set_finish_callback(NULL, NULL);
+    }
   }
 }
 
@@ -193,7 +214,7 @@ static void prv_begin(uint16_t index, uint32_t elapsed_ms) {
   s_armed = false;
   s_playing = true;
   speaker_set_finish_callback(prv_finished, NULL);
-  prv_play_chunk(index);
+  prv_play_chunk(index, elapsed_ms);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +226,7 @@ void audio_init(void) {
   s_next_chunk = 0;
   s_armed = false;
   s_finished = false;
+  s_deadline_ms = 0;
   s_song = 0;
 #if RB_DEBUG_LOG_AUDIO
   APP_LOG(APP_LOG_LEVEL_DEBUG, "music: song 0 has %u chunks, %lums",
@@ -286,6 +308,29 @@ void audio_song_start(uint8_t song, uint32_t elapsed_ms) {
 // It is also where every speaker call is made from, including the ones a chunk
 // boundary asks for -- see the note on prv_finished().
 void audio_tick(uint32_t elapsed_ms) {
+  // Watchdog: a chunk that never reports finishing must not take the rest of the
+  // song with it.
+  //
+  // The whole handover chain hangs off one callback, so anything that swallows
+  // it stops the music permanently and silently -- no error, nothing in the log,
+  // just a song that goes quiet partway and stays quiet. That is not
+  // hypothetical: a chunk over ~32s reproducibly never reports finishing, which
+  // is why chunks are capped by duration in the generator. This is the runtime
+  // half of that defence, and it covers the cases the cap cannot predict.
+  //
+  // The deadline is the chunk's own duration plus RB_MUSIC_STALL_MS of slack, so
+  // ordinary lateness -- a resync wait, a slow frame, accumulated drift -- can
+  // never trip it. Only a chunk that has genuinely stopped can.
+  if (s_playing && !s_armed && !s_finished && elapsed_ms > s_deadline_ms) {
+#if RB_DEBUG_LOG_AUDIO
+    APP_LOG(APP_LOG_LEVEL_DEBUG, "chunk %u never finished by %lums -- forcing handover",
+            (unsigned)(s_next_chunk - 1), (unsigned long)s_deadline_ms);
+#endif
+    speaker_stop();       // it may still be holding the output
+    s_finish_reason = (uint8_t)SpeakerFinishReasonDone;
+    s_finished = true;
+  }
+
   if (s_finished) {
     prv_handle_finished(elapsed_ms);
   }

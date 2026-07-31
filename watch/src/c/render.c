@@ -319,9 +319,10 @@ static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
     prv_draw_lane_badge(ctx, lay, lane);
   }
 
-  prv_draw_panel(ctx, GRect(8, 30, w - 16, 168));
+  prv_draw_panel(ctx, GRect(8, RB_TITLE_PANEL_Y, w - 16, RB_TITLE_PANEL_H));
 
-  prv_draw_text(ctx, "ROCKBEAT", FONT_KEY_GOTHIC_28_BOLD, GRect(10, 36, w - 20, 32),
+  prv_draw_text(ctx, "ROCKBEAT", FONT_KEY_GOTHIC_24_BOLD,
+                GRect(10, RB_TITLE_PANEL_Y + 4, w - 20, 30),
                 GTextAlignmentCenter, GColorYellow);
 
   // The song list. At most RB_TITLE_ROWS fit in the panel, so the list scrolls
@@ -355,14 +356,14 @@ static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
   char best[32];
   snprintf(best, sizeof(best), "BEST %lu", (unsigned long)save_high_score(selected));
   prv_draw_text(ctx, best, FONT_KEY_GOTHIC_18_BOLD,
-                GRect(10, (int16_t)(after_list + 4), w - 20, 24),
+                GRect(10, (int16_t)(after_list + 2), w - 20, 22),
                 GTextAlignmentCenter, GColorLightGray);
 
   prv_draw_text(ctx, "SELECT to play", FONT_KEY_GOTHIC_14_BOLD,
-                GRect(10, (int16_t)(after_list + 30), w - 20, 20),
+                GRect(10, (int16_t)(after_list + 24), w - 20, 18),
                 GTextAlignmentCenter, GColorWhite);
-  prv_draw_text(ctx, "UP / DOWN choose song", FONT_KEY_GOTHIC_14,
-                GRect(10, (int16_t)(after_list + 48), w - 20, 20),
+  prv_draw_text(ctx, "UP / DOWN choose", FONT_KEY_GOTHIC_14,
+                GRect(10, (int16_t)(after_list + 40), w - 20, 18),
                 GTextAlignmentCenter, GColorDarkGray);
 }
 

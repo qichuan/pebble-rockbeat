@@ -44,6 +44,13 @@ CHART_C = ROOT / "watch/src/c/chart.c"
 MUSIC_C = ROOT / "watch/src/c/music.c"
 
 TICKS_PER_BEAT_REQUIRED = 384
+
+# Onsets closer than a 32nd note are one melodic event. Expressed in note value
+# rather than milliseconds so it means the same thing at any tempo -- but it must
+# be derived from the DIVISION OF THE FILE BEING READ, never from the constant
+# above. See extract_melody().
+def min_onset_ticks(ticks_per_beat: int) -> int:
+    return max(1, ticks_per_beat // 8)
 BEATS_PER_BAR = 4
 LEAD_MS = 2000
 TAIL_MS = 2500
@@ -83,11 +90,32 @@ SONGS = (
     # ~57s. The melody is on an exact sixteenth grid, which is what lets every
     # note be charted -- see build_chart().
     Song("Never Gonna Give You Up", "ngg", DATA / "melody.mid", 12, 28),
-    # 59 BPM, so a bar is 4.1s and 14 bars is ~57s -- the same length as above
-    # from a quarter of the bars. The last 14 bars are the final chorus, and the
-    # section ends where the song does rather than being cut mid-phrase.
-    Song("You Are Not Alone", "yana", DATA / "you-are-not-alone.mid", 58, 14),
+
+    # 59 BPM, so a bar is 4.1s and 14 bars is ~57s.
+    #
+    # A chorus repeat -- this 8-bar phrase recurs five more times across the song
+    # -- taken in preference to its first occurrence at bar 18 because it sounds
+    # for 60% of its length against 53%, with a worst silence of 3.0s against
+    # 3.8s. Well clear of the fade-out after bar 64, where the arrangement writes
+    # velocity 1 and the game would show notes with nothing behind them.
+    Song("You Are Not Alone", "yana", DATA / "you-are-not-alone.mid", 30, 14),
+
+    # 93 BPM. Starts at bar 11, which is 0:25 in the source.
+    #
+    # Bars 10-12 repeat bars 6-8 note for note, so bar 11 is the fifth of five
+    # repeated notes rather than the head of the line -- the section opens on the
+    # moving part of the phrase instead of on its static run-up. Bar 12 (0:27) is
+    # the next phrase head if that reads better; every measure that matters is
+    # identical between them, so it is purely a musical choice.
+    #
+    # This is the second arrangement of this song. The first was a piano solo
+    # whose every 28-bar window failed to chart until near-simultaneous onsets
+    # were collapsed, and which then cleared the same-lane floor by 1ms. This one
+    # clears it by 241ms and places every note on its pitch lane.
+    Song("Golden", "golden", DATA / "golden.mid", 11, 28),
 )
+
+
 
 # tools/extract_melody.py defaults to re-deriving the first song's melody file.
 DEFAULT_MIDI = SONGS[0].midi
@@ -136,6 +164,16 @@ SAME_LANE_MIN_MS = 250
 # The margin is relative for a reason: see the note in build_chart().
 BIG_VELOCITY_MARGIN = 8
 BIG_HELD_MS = 700
+
+# Two chart notes closer than this are reported, loudly, at generation time.
+#
+# They are NOT an error and nothing is dropped -- the chart is every melody note,
+# and a subdivision this tight can be genuine (song 1's sixteenths are 127ms).
+# But it is also what a grace note looks like, and an ornament charted as two
+# hits 50ms apart is not playable however good the player is. The count is
+# printed so the section can be moved instead, which is what happened for
+# "I Want It That Way".
+PLAYABLE_MIN_MS = 100
 
 # Lane 0 is the LOWER of the two lanes on screen.  Only the top two lanes are
 # used now, so lane 0 = MIDDLE (SELECT) and lane 1 = TOP (UP); the DOWN button
@@ -202,6 +240,42 @@ WAVE_SINE, WAVE_SQUARE, WAVE_TRIANGLE, WAVE_SAWTOOTH = 0, 1, 2, 3
 MELODY_WAVE = WAVE_SINE
 MELODY_VELOCITY = 100
 
+def velocity_gain(melody: list[MidiNote]) -> float:
+    """Scale factor bringing this melody's loudest note to full scale.
+
+    Arrangements are written at wildly different levels: the four bundled here
+    peak at 124, 97 and -- for the solo-piano "Golden" -- 40. Emitting those
+    raw would make one song a third the volume of another for no musical reason,
+    and on "Golden" every note would land under MELODY_MIN_VELOCITY and be
+    flattened onto the floor, throwing away its dynamics entirely.
+
+    A single gain per song, rather than stretching each melody across the full
+    range: stretching would turn "Never Gonna Give You Up"'s near-flat 119-124
+    into a 55-100 swing that is not in the music. Ratios between notes are
+    preserved exactly; only the overall level moves.
+    """
+    loudest = max((n.velocity for n in melody), default=MELODY_VELOCITY)
+    return MELODY_VELOCITY / loudest if loudest else 1.0
+
+
+def scaled_velocity(velocity: int, gain: float) -> int:
+    level = int(round(velocity * gain))
+    return max(MELODY_MIN_VELOCITY, min(MELODY_VELOCITY, level))
+
+
+# Floor on the velocity actually emitted.
+#
+# A note the player is asked to hit has to be audible. Arrangements write
+# fade-outs and swells as velocity, and one of these does it brutally -- "You Are
+# Not Alone" drops to velocity 1 for its last eight bars, which on the watch is
+# silence. The chart is unaffected, so the game showed notes to hit with no sound
+# behind them, and nothing in the pipeline objected.
+#
+# Choosing a section clear of the fade is the real fix, and that is what SONGS
+# does. This is the backstop for the next arrangement that does something similar
+# somewhere less obvious. Relative dynamics above the floor are preserved.
+MELODY_MIN_VELOCITY = 55
+
 # Transpose the melody, as a whole, so its median lands at least here.
 # MIDI 72 = 523Hz, comfortably inside a watch speaker's usable band; this MIDI's
 # melody sits at 208-415Hz, where the driver is weak and mostly emits harmonics.
@@ -210,9 +284,30 @@ MELODY_TARGET_MEDIAN = 72
 # Nothing sustains longer than this; the remainder of a longer note becomes rest.
 #
 # speaker_play_tracks() has no envelope -- a note plays at constant amplitude for
-# its whole duration -- so a long note is a drone rather than a decaying tone,
-# and a drone on a small speaker reads as buzz.
-MAX_SUSTAIN_MS = 260
+# its whole duration -- so a very long note is a drone rather than a decaying
+# tone, and a drone on a small speaker reads as buzz. That is why a cap exists.
+#
+# It was 260ms, and that was far too tight. 260 was chosen when the watch played
+# a four-track reduction, where several fixed-amplitude tones at once really did
+# turn into buzz; a single sine line is a completely different proposition. On a
+# ballad it was the dominant source of silence -- "You Are Not Alone" is legato
+# 85% of its section and sounded for 26% of it, so the melody arrived as
+# unconnected plucks separated by up to two seconds of nothing.
+#
+# Raising it costs less than it looks: consecutive notes already cut each other
+# off (see the overlap trim below), so this only ever extends the LAST note
+# before a rest -- exactly the held note at the end of a phrase. Measured effect
+# on how much of a section sounds:
+#
+#            260ms   600ms   800ms   1000ms
+#   YANA       26%     47%     54%      59%
+#   IWITW      41%     64%     69%      71%
+#   DQ         28%     43%     47%      50%
+#
+# 800 takes most of the available gain while staying well under the ~1900ms notes
+# that were audibly droning. If a held note ever does buzz, this is the number to
+# bring back down.
+MAX_SUSTAIN_MS = 800
 
 # Silence inserted at the end of every sounding note.
 #
@@ -252,8 +347,10 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote], 
     fmt, tracks, division = struct.unpack(">HHH", data[8:14])
     if fmt not in (0, 1) or division & 0x8000:
         raise ValueError("only metrical format-0/1 MIDI files are supported")
-    if division != TICKS_PER_BEAT_REQUIRED:
-        raise ValueError(f"expected {TICKS_PER_BEAT_REQUIRED} ticks/beat, got {division}")
+    # Any metrical division is parsed. The 384 requirement belongs to the bar
+    # arithmetic in build_song(), not to reading a file -- tools/extract_melody.py
+    # has to read arbitrary arrangements in order to normalise them, and the
+    # bundled sources arrive at 120, 192 and 384 ticks per beat.
 
     pos = 8 + header_len
     tempos = [(0, 500000)]
@@ -416,8 +513,47 @@ def pick_melody_channel(notes: list[MidiNote], programs: dict[int, int], tick_to
     return best
 
 
+# Smallest gap between adjacent velocity values that counts as separating two
+# voices rather than expressing dynamics within one.
+VELOCITY_SPLIT_MIN_GAP = 25
+
+# ...and the upper cluster has to be big enough to plausibly BE the melody.
+VELOCITY_SPLIT_MIN_SHARE = 0.15
+
+
+def melody_velocity_floor(notes: list[MidiNote]) -> int:
+    """Velocity below which notes on this channel are accompaniment, not melody.
+
+    Piano arrangements routinely put the tune and its accompaniment on ONE
+    channel and separate them by touch alone. "Golden" is written that way: the
+    melody at velocity 100, an ostinato under it at 50-63. Skyline cannot tell
+    them apart -- whenever the tune rests, the ostinato becomes the highest
+    sounding note and is charted as though it were the melody, so the player is
+    asked to hit an accompaniment figure.
+
+    So the velocities are checked for a GAP. A file that separates two voices
+    this way leaves an obvious one (50/63 -> 100, a gap of 37); a file that is
+    merely played expressively does not ("You Are Not Alone" runs 49-97 in small
+    steps). Returns 0 when there is no such gap, which leaves every note in and
+    is the right answer for every other song here.
+    """
+    velocities = sorted({n.velocity for n in notes})
+    if len(velocities) < 2:
+        return 0
+    gap, index = max((velocities[i + 1] - velocities[i], i)
+                     for i in range(len(velocities) - 1))
+    if gap < VELOCITY_SPLIT_MIN_GAP:
+        return 0
+    floor = velocities[index + 1]
+    kept = sum(1 for n in notes if n.velocity >= floor)
+    if kept < len(notes) * VELOCITY_SPLIT_MIN_SHARE:
+        return 0        # too thin to be the tune; treat the gap as noise
+    return floor
+
+
 def extract_melody(notes: list[MidiNote], channel: int,
-                   start_tick: int, end_tick: int) -> list[MidiNote]:
+                   start_tick: int, end_tick: int,
+                   ticks_per_beat: int = TICKS_PER_BEAT_REQUIRED) -> list[MidiNote]:
     """Skyline within the chosen channel, forced monophonic.
 
     Where notes overlap, the higher one wins and the lower is dropped rather
@@ -429,11 +565,32 @@ def extract_melody(notes: list[MidiNote], channel: int,
     writes is a general extraction rather than an excerpt.
     """
     lo, hi = start_tick, end_tick
-    group = sorted((n for n in notes
-                    if n.channel == channel and lo <= n.start < hi),
+    # Scaled to THIS file's division. Hard-coding the 384-tick figure made this a
+    # whole quarter note on a 48-tick-per-beat source, which collapsed the melody
+    # to one note per beat -- and it did so silently, producing a plausible-
+    # looking line at a uniform 492ms that bore no relation to the arrangement.
+    min_onset = min_onset_ticks(ticks_per_beat)
+    candidates = [n for n in notes if n.channel == channel and lo <= n.start < hi]
+    # Drop accompaniment written on the melody's own channel BEFORE the skyline
+    # runs -- afterwards is too late, because skyline will already have promoted
+    # it wherever the tune rests.
+    floor = melody_velocity_floor(candidates)
+    group = sorted((n for n in candidates if n.velocity >= floor),
                    key=lambda n: (n.start, -n.pitch))
     melody: list[MidiNote] = []
     for note in group:
+        # Two onsets closer together than a 32nd note are one melodic event, not
+        # two. Rolled chords and grace notes arrive as separate note-ons a few
+        # milliseconds apart, and the skyline rule above only removes them when
+        # they OVERLAP -- a chord spread 1ms at a time survives it intact. The
+        # solo-piano arrangement of "Golden" carries six such pairs, at 1, 25 and
+        # 31ms, which are unplayable as separate hits and are not what anyone
+        # hears. The higher note wins, consistent with the skyline.
+        if melody and note.start - melody[-1].start < min_onset:
+            if note.pitch > melody[-1].pitch:
+                melody[-1] = MidiNote(melody[-1].start, max(note.end, melody[-1].end),
+                                      note.channel, note.pitch, note.velocity)
+            continue
         if melody and note.start < melody[-1].end:
             if note.pitch <= melody[-1].pitch:
                 continue                      # covered by a higher note
@@ -547,6 +704,7 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms, song: Song):
     """
     origin = tick_to_ms(song.start_tick)
     total_ms = int(round(tick_to_ms(song.end_tick) - origin))
+    gain = velocity_gain(melody)
     bar_ticks = BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
 
     placed: list[tuple[int, int, int, int]] = []
@@ -564,7 +722,7 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms, song: Song):
 
     # Accumulate whole bars into a chunk until one more would cross CHUNK_MAX_MS.
     # Splitting on a bar keeps every handover on a downbeat.
-    bounds = []
+    edges = []
     tick = song.start_tick
     while tick < song.end_tick:
         nxt = min(tick + bar_ticks, song.end_tick)
@@ -573,9 +731,36 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms, song: Song):
             if tick_to_ms(after) - tick_to_ms(tick) > CHUNK_MAX_MS:
                 break
             nxt = after
-        bounds.append((int(round(tick_to_ms(tick) - origin)),
-                       int(round(tick_to_ms(nxt) - origin))))
+        edges.append(int(round(tick_to_ms(tick) - origin)))
         tick = nxt
+    edges.append(int(round(tick_to_ms(song.end_tick) - origin)))
+
+    # Nudge each internal boundary off any note it lands inside, to the end of
+    # that note.
+    #
+    # A note straddling a boundary used to be CUT IN TWO -- clipped at the end of
+    # one chunk and started again at the beginning of the next. That produces two
+    # onsets for one chart note, which breaks the one-note-one-sound guarantee
+    # outright, and if the leading fragment came out under the minimum length it
+    # was dropped instead, leaving a charted note with no sound at all. Both
+    # happened once MAX_SUSTAIN_MS was raised and notes grew long enough to reach
+    # a boundary: three duplicated onsets across two songs, and one silent note.
+    #
+    # Moving the boundary instead costs a slightly uneven chunk -- bounded by the
+    # sustain cap, so far inside CHUNK_MAX_MS's margin -- and keeps every note
+    # whole and every onset exactly where the chart says it is.
+    # The FINAL edge is nudged too, for the same reason and one more: a note
+    # starting a few milliseconds before the section ends leaves a fragment
+    # shorter than the minimum sounding length, so it is dropped -- and that note
+    # is still charted, giving the player a last note to hit in silence. Letting
+    # the music run the extra few hundred ms past the section costs nothing,
+    # since the chart already allows TAIL_MS of run-off after it.
+    for i in range(1, len(edges)):
+        for start_ms, end_ms, _pitch, _velocity in placed:
+            if start_ms < edges[i] < end_ms:
+                edges[i] = end_ms
+                break
+    bounds = list(zip(edges, edges[1:]))
 
     def append_rest(seq, ms: int) -> None:
         """A rest longer than the SDK's per-note cap has to be split.
@@ -606,7 +791,7 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms, song: Song):
             sounding = end_ms - start_ms
             if sounding > NOTE_GAP_MS + 25:
                 sounding -= NOTE_GAP_MS
-            seq.append((pitch, MELODY_WAVE, sounding, min(MELODY_VELOCITY, velocity)))
+            seq.append((pitch, MELODY_WAVE, sounding, scaled_velocity(velocity, gain)))
             if end_ms - start_ms > sounding:
                 append_rest(seq, (end_ms - start_ms) - sounding)
             cursor = end_ms
@@ -736,6 +921,14 @@ bool chart_load_from_resource(uint32_t resource_id, Chart *out_chart) {
 def build_song(song: Song):
     """Everything for one song: melody, chart, music, and a printed report."""
     ticks_per_beat, tempos, notes, programs = parse_midi(song.midi)
+    # Every bar boundary below is computed as a fixed number of ticks, so the
+    # grid has to be the one the section constants were written against.
+    # tools/extract_melody.py normalises whatever the source used, which is why
+    # this holds for every file in SONGS.
+    if ticks_per_beat != TICKS_PER_BEAT_REQUIRED:
+        raise ValueError(f"{song.midi.name}: expected {TICKS_PER_BEAT_REQUIRED} "
+                         f"ticks/beat, got {ticks_per_beat} -- re-run "
+                         f"tools/extract_melody.py on it")
     tick_to_ms = make_tick_to_ms(tempos, ticks_per_beat)
 
     channel = pick_melody_channel(notes, programs, tick_to_ms, song)
@@ -774,14 +967,45 @@ def build_song(song: Song):
 
     print(f"\n{song.title}  [{song.midi.name}, bars {song.start_bar}-"
           f"{song.start_bar + song.bars}, {bpm} BPM, {duration_s:.1f}s]")
+    velocities = [n.velocity for n in melody]
     print(f"  melody: channel {channel} (GM program {programs.get(channel)}), "
-          f"{len(melody)} notes, +{shift // 12} octave(s) -> {lo:.0f}-{hi:.0f}Hz")
+          f"{len(melody)} notes, +{shift // 12} octave(s) -> {lo:.0f}-{hi:.0f}Hz, "
+          f"velocity {min(velocities)}-{max(velocities)}")
+    # Judged on what is EMITTED, after the per-song gain -- a quietly written
+    # arrangement is not a problem, a passage quiet relative to its own song is.
+    gain = velocity_gain(melody)
+    emitted = [scaled_velocity(v, gain) for v in velocities]
+    pinned = [i for i, v in enumerate(emitted) if v <= MELODY_MIN_VELOCITY]
+    print(f"          gain x{gain:.2f} -> emitted velocity "
+          f"{min(emitted)}-{max(emitted)}")
+    if pinned:
+        # A FADE is a run of consecutive quiet notes, usually trailing; scattered
+        # soft notes are just an arrangement's phrasing and need no action. Worth
+        # telling apart, because the first means the section is wrong and the
+        # second means nothing at all.
+        longest_run, run = 1, 1
+        for a, b in zip(pinned, pinned[1:]):
+            run = run + 1 if b == a + 1 else 1
+            longest_run = max(longest_run, run)
+        if longest_run >= 4:
+            print(f"          WARNING: {len(pinned)}/{len(emitted)} notes at the "
+                  f"velocity floor, {longest_run} of them consecutive -- that is a "
+                  f"FADE. They stay audible, but a section clear of it is the "
+                  f"better fix")
+        else:
+            print(f"          note: {len(pinned)}/{len(emitted)} notes lifted to "
+                  f"the velocity floor, scattered (longest run {longest_run}) -- "
+                  f"phrasing, not a fade")
     print(f"  chart:  {len(chart)} notes ({len(chart) / duration_s:.2f}/s) -- "
           f"every melody note, 1:1")
     print(f"          lanes {LANE_NAMES[0]}={per_lane[0]} {LANE_NAMES[1]}={per_lane[1]}, "
           f"{forced} placed off-pitch to keep spacing")
+    cramped = sum(1 for a, b in zip(chart, chart[1:]) if b[0] - a[0] < PLAYABLE_MIN_MS)
     print(f"          tightest gap {tightest}ms; tightest SAME-LANE gap {same_lane}ms "
           f"(needs >= {SAME_LANE_MIN_MS}, i.e. RB_MISS_MS <= {same_lane // 2})")
+    if cramped:
+        print(f"          WARNING: {cramped} pair(s) under {PLAYABLE_MIN_MS}ms apart -- "
+              f"likely grace notes; consider a different section")
     print(f"  music:  {len(chunks)} chunks, up to {notes_per_chunk} notes each "
           f"(cap {MAX_NOTES_PER_TRACK})")
 

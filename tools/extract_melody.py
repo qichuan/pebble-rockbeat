@@ -37,6 +37,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from make_chart import (  # noqa: E402  (path set above)
+    TICKS_PER_BEAT_REQUIRED,
     MidiNote,
     Song,
     extract_melody,
@@ -106,6 +107,37 @@ def build_track(melody: list[MidiNote], tempos: list[tuple[int, int]],
     return b"MTrk" + struct.pack(">I", len(body)) + bytes(body)
 
 
+def resample(melody: list[MidiNote], tempos: list[tuple[int, int]], division: int):
+    """Rewrite tick positions onto the TICKS_PER_BEAT_REQUIRED grid.
+
+    Every melody file this tool writes uses one division, so make_chart.py only
+    ever has to reason about a single tick grid -- and the songs it generates are
+    directly comparable. Sources vary: the four bundled arrangements came in at
+    120, 192 and 384 ticks per beat.
+
+    This preserves real time EXACTLY in principle, because time is ticks/tpb
+    scaled by tempo: multiplying ticks and tpb by the same factor cancels. Only
+    integer rounding costs anything, and at 384 ticks per beat half a tick is
+    about 0.7ms at 100 BPM -- far below anything the game or the ear resolves.
+    The tempo map is carried across untouched apart from its own tick positions.
+
+    Normalising here rather than generalising the generator is deliberate: it
+    puts the conversion at the single boundary where a file enters the pipeline,
+    instead of threading a variable ticks-per-beat through every function that
+    does bar arithmetic downstream.
+    """
+    if division == TICKS_PER_BEAT_REQUIRED:
+        return melody, tempos
+
+    def scale(tick: int) -> int:
+        return (tick * TICKS_PER_BEAT_REQUIRED + division // 2) // division
+
+    scaled = [MidiNote(scale(n.start), max(scale(n.end), scale(n.start) + 1),
+                       n.channel, n.pitch, n.velocity)
+              for n in melody]
+    return scaled, [(scale(tick), tempo) for tick, tempo in tempos]
+
+
 def write_midi(path: Path, division: int, track: bytes) -> None:
     header = b"MThd" + struct.pack(">I", 6) + struct.pack(">HHH", 0, 1, division)
     path.write_bytes(header + track)
@@ -131,20 +163,27 @@ def main() -> None:
     bars = max(1, -(-(last + 1) // (384 * 4)))
     whole = Song(source.stem, "whole", source, 0, bars)
     channel = pick_melody_channel(notes, programs, tick_to_ms, whole)
-    melody = extract_melody(notes, channel, 0, last + 1)
+    # `division` is this file's own ticks-per-beat, and extraction happens BEFORE
+    # resampling, so it has to be passed -- the default is the post-resample grid.
+    melody = extract_melody(notes, channel, 0, last + 1, division)
     if not melody:
         sys.exit(f"no melody found on channel {channel}")
 
-    track = build_track(melody, tempos, programs.get(channel))
-    write_midi(out, division, track)
-
+    # Span is measured BEFORE resampling, on the grid tick_to_ms was built for.
+    # Measuring after would apply the source's ticks-per-beat to rescaled ticks
+    # and report the duration inflated by exactly the resampling ratio.
     span = (tick_to_ms(melody[-1].end) - tick_to_ms(melody[0].start)) / 1000.0
+
+    melody, out_tempos = resample(melody, tempos, division)
+    track = build_track(melody, out_tempos, programs.get(channel))
+    write_midi(out, TICKS_PER_BEAT_REQUIRED, track)
     pitches = [n.pitch for n in melody]
     print(f"{source.name}: {len(notes)} notes, channels "
           f"{sorted({n.channel for n in notes})}")
     print(f"melody: channel {channel} (GM program {programs.get(channel)}), "
           f"{len(melody)} notes over {span:.1f}s, pitch {min(pitches)}-{max(pitches)}")
-    print(f"wrote {out} ({out.stat().st_size} bytes, format 0, channel {OUT_CHANNEL})")
+    print(f"wrote {out} ({out.stat().st_size} bytes, format 0, channel {OUT_CHANNEL}, "
+          f"{division} -> {TICKS_PER_BEAT_REQUIRED} ticks/beat)")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ pebble logs --emulator emery
 pebble kill
 ```
 
-From the repo root: `./tools/run_tests.sh` (expect `OK: 2886 checks passed`).
+From the repo root: `./tools/run_tests.sh` (expect `OK: 3484 checks passed`).
 
 This tool version does **not** accept `--scale`. `--vnc` disables emulator audio.
 
@@ -285,9 +285,125 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   appear. The section (which bars) is the one thing that cannot be derived; it
   is a musical judgement.
 
-- **Song 2 is "You Are Not Alone"**: 59 BPM, bars 58-72 (the final chorus, ~57s
-  — the same length as song 1 from a quarter of the bars), melody channel 3 /
-  GM 73, 71 notes at 1.25/s against song 1's 2.76/s.
+- **Three songs**: Never Gonna Give You Up (118 BPM, bars 12-40, 157 notes),
+  You Are Not Alone (59 BPM, bars 30-44, 74), Golden (93 BPM, bars 11-39, 146).
+  All ~55-57s. "I Want It That Way" and "Dancing Queen" were removed on request.
+
+- **Golden's section starts at bar 11 = 0:25, given as a timestamp.** Convert a
+  timestamp to the nearest bar and then CHECK what the melody is doing there:
+  bars 10-12 repeat bars 6-8 note for note, so bar 11 is the fifth of five
+  repeated notes rather than a phrase head. It opens on the moving part of the
+  line, which reads fine; bar 12 is the next phrase head if it ever needs to
+  change. Every technical measure is identical across bars 10, 11 and 12, so
+  that choice is purely musical.
+
+- **Velocity is normalised PER SONG** (`velocity_gain`). Arrangements are written
+  at wildly different levels -- these peak at 124, 97 and 39 -- so emitting raw
+  velocity makes one song a third the volume of another for no musical reason.
+  A single gain per song brings the loudest note to full scale and preserves
+  every ratio; do NOT stretch each melody across the range instead, which would
+  turn song 1's near-flat 119-124 into a 55-100 swing that is not in the music.
+
+- **A melody can share its channel with the accompaniment, separated only by
+  VELOCITY.** "Golden" is a piano arrangement written that way: tune at 100, an
+  ostinato under it at 50-63. Skyline cannot tell them apart -- wherever the tune
+  rests the ostinato becomes the highest sounding note, and the player is asked
+  to hit an accompaniment figure. `melody_velocity_floor()` looks for a GAP in
+  the velocity values and drops everything below it, BEFORE the skyline runs;
+  afterwards is too late. It returns 0 (keep everything) unless the gap is
+  clear, so a merely expressive part is untouched -- measured: Golden splits at
+  95, the other two songs do not split at all.
+
+- **Anything expressed in TICKS must be scaled to the file's own division.**
+  `MIN_ONSET_TICKS` was derived from `TICKS_PER_BEAT_REQUIRED` (384) but applied
+  by `extract_melody.py` to the raw source BEFORE resampling. On a 48-tick file
+  that made it a whole quarter note, and it collapsed the melody to one note per
+  beat -- silently, producing a plausible uniform 492ms line that bore no
+  relation to the arrangement. It is now `min_onset_ticks(ticks_per_beat)` and
+  the caller passes the file's division. Check any new tick constant the same
+  way; the pipeline reads files at 48, 120, 192, 384 and 480.
+
+- **Onsets closer than a 32nd note are ONE melodic event** (`MIN_ONSET_TICKS`).
+  Rolled chords and grace notes arrive as separate note-ons a few ms apart, and
+  the skyline rule only removes them when they OVERLAP -- a chord spread 1ms at a
+  time survives it intact. The FIRST arrangement of "Golden" carried six such
+  pairs at 1, 25 and 31ms, and without collapsing them every 28-bar window of it
+  failed to chart. The arrangement now in use needs no such help (its tightest
+  gap is 491ms), but the rule is right in general and stays.
+
+- **The same song can differ enormously between arrangements.** Two files of
+  "Golden": the first cleared the same-lane floor by 1ms and only charted at all
+  once near-simultaneous onsets were collapsed; the second clears it by 241ms
+  with nothing special done. If a song fights the constraints, the arrangement
+  is worth changing before the constraints are.
+
+- **A section is chosen on FOUR measures, not one.** Getting any of them wrong
+  ships a song that is technically valid and bad to play:
+  - **Is it the chorus?** Fingerprint the melody on a half-beat grid and count
+    how often each 8-bar window recurs; the chorus is the most-repeated phrase.
+    Mean pitch is a decent tiebreak -- a chorus sits on top of the range.
+  - **How much of it SOUNDS?** Dancing Queen's most-repeated hook contains a
+    **12.1 second stretch with no melody at all** -- an instrumental break -- and
+    sounded for 47% of its length. Rank by longest silence, not just by average.
+  - **Velocity.** See the fade-out entry below.
+  - **Grace notes.** See the entry below.
+
+- **`extract_melody.py` resamples every source onto 384 ticks/beat.** Sources
+  arrive at 120, 192 and 384. Normalising at that one boundary is deliberate:
+  the alternative is threading a variable ticks-per-beat through every function
+  downstream that does bar arithmetic. `parse_midi()` therefore accepts any
+  metrical division, and the 384 requirement is asserted in `build_song()`, where
+  the bar maths actually lives. Resampling preserves real time exactly bar
+  rounding (~0.7ms).
+
+- **Check the section's VELOCITIES, not just its notes.** Arrangements write
+  fade-outs as velocity, and "You Are Not Alone" drops to **velocity 1** for its
+  last eight bars. The original section (58-72) was the final chorus and ran
+  straight into it, so the second half of that song charted notes the player
+  could see and hit with **no sound at all** -- and nothing objected, because the
+  chart is built from note positions and never looks at velocity. Symptom on the
+  watch: "there's no music in the later part."
+  - The section now ends two bars clear of the fade.
+  - `MELODY_MIN_VELOCITY` floors what is emitted, as a backstop for the next
+    arrangement that fades somewhere less obvious. Relative dynamics above the
+    floor are kept.
+  - The generator prints each melody's velocity range and warns when notes fall
+    under the floor. That is the check that would have caught this.
+
+- **`MAX_SUSTAIN_MS` was 260 and that was far too tight.** It exists because
+  `speaker_play_tracks()` has no envelope, so a very long note is a drone that
+  reads as buzz -- but 260 was set when the watch played a FOUR-TRACK reduction,
+  where simultaneous fixed-amplitude tones were the real problem. One sine line
+  is a different proposition. At 260 a ballad arrived as unconnected plucks:
+  "You Are Not Alone" is legato 85% of its section and sounded for 26% of it.
+  Now 800, which roughly doubles every song. It costs less than it looks --
+  consecutive notes already cut each other off, so this only extends the last
+  note before a rest.
+
+- **Chunk boundaries are nudged off notes, never through them.** A note
+  straddling a boundary used to be clipped at the end of one chunk and restarted
+  at the beginning of the next: two onsets for one chart note, breaking
+  one-note-one-sound. Worse, a leading fragment under the minimum length was
+  dropped, leaving a charted note with NO sound. Both appeared the moment
+  MAX_SUSTAIN_MS grew long enough for notes to reach a boundary -- three
+  duplicated onsets and one silent note. The final edge is nudged too, for a
+  note starting a few ms before the section ends.
+
+- **Nothing may stop the music permanently.** The whole handover chain hangs off
+  one finish callback, so anything that swallows it silences the rest of the song
+  with no error and nothing in the log. Two defences, both in `audio.c`:
+  - a **watchdog** in `audio_tick()` forces the handover if a chunk has not
+    reported finishing `RB_MUSIC_STALL_MS` past its own duration;
+  - a failed `speaker_play_tracks()` **arms the next chunk** instead of giving
+    up, so a transient failure costs one chunk rather than the remainder.
+
+- **Pick a section on mean melody pitch, and check for grace notes.** A chorus
+  usually sits on top of the singer's range, so mean pitch per 8-bar block finds
+  it. But "I Want It That Way" charts fine in most windows while containing
+  ornaments **50ms apart** -- unhittable, and invisible unless looked for, since
+  nothing is dropped and the chart validates. The generator now warns on any pair
+  under `PLAYABLE_MIN_MS`; move the section rather than dropping the note, which
+  would break the 1:1 promise.
 
 - **Sound and haptics are always on.** The toggles used to live on UP/DOWN on the
   title screen, which is where the song selector now is. `save.c` no longer

@@ -64,7 +64,7 @@ The judgment windows, scoring and combo logic are unit-tested on the host, with
 no emulator involved:
 
 ```bash
-./tools/run_tests.sh      # expect: OK: 2886 checks passed
+./tools/run_tests.sh      # expect: OK: 3484 checks passed
 ```
 
 This works because `game.c` and `chart.c` do not include `<pebble.h>` — they are
@@ -227,10 +227,41 @@ the project.
 | | tempo | section | chart |
 |---|---|---|---|
 | **Never Gonna Give You Up** | 118 BPM | bars 12–40 | 157 notes, 2.76/s |
-| **You Are Not Alone** | 59 BPM | bars 58–72, the final chorus | 71 notes, 1.25/s |
+| **You Are Not Alone** | 59 BPM | bars 30–44 | 74 notes, 1.30/s |
+| **Golden** | 93 BPM | bars 11–39 (from 0:25) | 146 notes, 2.65/s |
 
-Both run ~57 seconds. The second is a ballad at half the tempo, so the same
-length comes from a quarter of the bars, and it plays far sparser.
+All three run ~55–57 seconds, which at these tempos means anywhere from 14 to 28
+bars. "Golden" starts at 0:25. Its chorus line repeats, so that lands on the
+moving part of the phrase rather than its head — a musical choice, since every
+technical measure is identical across the neighbouring bars.
+
+Four things decide a section, and only one of them is mechanical. Each of the
+others cost a real bug:
+
+- **Density has to be chartable.** With two lanes the generator refuses a song
+  whose notes cannot be placed a judgment window apart in either lane, so an
+  unplayable section fails the build rather than shipping.
+- **Which bars are the chorus is a musical judgement.** Mean melody pitch is a
+  decent proxy — a chorus usually sits on top of the singer's range — and that
+  is how Dancing Queen's last 24 bars were picked, where the mean holds at 69–70
+  across all three 8-bar blocks.
+
+A third thing decides it, and it cost a real bug: **check the velocities.**
+Arrangements write fade-outs as velocity, and "You Are Not Alone" drops to
+**velocity 1** for its last eight bars. Its original section was the final
+chorus and ran straight into that, so the back half of the song showed notes to
+hit with no sound behind them — the chart is built from note positions and never
+looks at velocity, so nothing objected. The section now ends two bars clear of
+the fade, `MELODY_MIN_VELOCITY` floors what is emitted as a backstop, and the
+generator prints each melody's velocity range and warns on faint notes.
+
+"I Want It That Way" is the one where the first two collided. Most of its windows chart
+fine but contain **grace notes as little as 50 ms apart** — an ornament, not a
+rhythm, and two buttons 50 ms apart is not something a player can hit. Bars 56–80
+avoid them; its tightest pair is 117 ms, comparable to song 1's sixteenths. The
+generator now prints a warning for any pair under 100 ms rather than letting it
+through silently, since nothing is dropped and the chart would otherwise look
+perfectly valid.
 
 **Adding a song is a generator-only change.** `SONGS` in `tools/make_chart.py`
 holds the title, the melody `.mid`, and the section; `chart_count()` drives the
@@ -323,7 +354,13 @@ To add a song: extract its melody, add a `Song` entry, regenerate.
 python3 tools/extract_melody.py path/to/arrangement.mid watch/resources/data/new.mid
 ```
 
-Any 384-tick/beat format 0/1 SMF works. The generator will refuse the song rather
+Any format 0/1 SMF works, at any metrical division. `extract_melody.py`
+resamples onto a single 384-ticks-per-beat grid — the four bundled arrangements
+arrived at 120, 192 and 384 — so `make_chart.py` only ever reasons about one tick
+grid, and the songs it generates stay directly comparable. Resampling preserves
+real time exactly in principle (time is ticks/tpb scaled by tempo, so multiplying
+both cancels); only integer rounding costs anything, and half a tick at 384 is
+about 0.7 ms. The generator will refuse the song rather
 than emit an unplayable chart if two notes cannot be placed a judgment window
 apart in either lane — see the spacing rule above.
 
