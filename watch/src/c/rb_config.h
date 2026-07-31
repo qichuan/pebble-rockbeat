@@ -29,7 +29,7 @@
 //    0..56    HUD          score left, combo right
 //   56..106   lane TOP     UP button
 //  106..112   gutter
-//  112..162   lane BOT     DOWN button
+//  112..162   lane BOT     SELECT button
 //  162..168   gutter
 //  168..220   song band    art tile + title/artist
 //  220..228   progress
@@ -71,6 +71,13 @@
 #define RB_TARGET_CX 176
 #define RB_TARGET_R 20
 #define RB_TARGET_RING_W 5
+
+// The arrow badge inside a resting target ring: 12px along its axis, 8px either
+// side of it. Sized to sit inside RB_TARGET_R - RB_TARGET_RING_W (15px) with a
+// little air, and the same both ways round so the UP and RIGHT badges read as
+// the same mark rotated rather than as two different shapes.
+#define RB_ARROW_LEN 12
+#define RB_ARROW_HALF 8
 
 // Notes are 28px across in the design, so r=14, with a 3px white ring and an
 // inner dot in the lane's own bed colour.

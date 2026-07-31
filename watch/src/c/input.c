@@ -19,7 +19,7 @@ static void prv_lane_down(ClickRecognizerRef recognizer, void *context) {
   uint8_t lane = RB_LANE_NONE;
   if (button == BUTTON_ID_UP) {
     lane = RB_LANE_TOP;
-  } else if (button == BUTTON_ID_DOWN) {
+  } else if (button == BUTTON_ID_SELECT) {
     lane = RB_LANE_BOT;
   }
 
@@ -48,16 +48,19 @@ void input_click_config_provider(void *context) {
   // the player held the button would be added to their timing. The up_handler is
   // NULL -- hold length carries no meaning here.
   //
-  // The LANES are UP and DOWN, the two ends of the button stack: both can be
-  // found without looking, which SELECT -- boxed in by its neighbours -- cannot.
+  // The LANES are UP and SELECT -- the top two buttons, adjacent, so both lanes
+  // are reachable without the thumb travelling the length of the stack. That is
+  // why the lower lane's badge is a RIGHT arrow rather than a down one: SELECT
+  // is the middle button, and pointing its badge downwards would name the wrong
+  // button. See chart.h for why the geometric "lane sits at its button" rule
+  // does not survive here.
   window_raw_click_subscribe(BUTTON_ID_UP, prv_lane_down, NULL, NULL);
-  window_raw_click_subscribe(BUTTON_ID_DOWN, prv_lane_down, NULL, NULL);
-
-  // SELECT is subscribed but is NOT a gameplay lane: there is no band between
-  // the two lanes for it to point at, and aliasing it onto one would break the
-  // rule that a lane sits where its button does. It reports RB_LANE_NONE, which
-  // the menus act on -- start, resume -- and the playfield ignores outright.
   window_raw_click_subscribe(BUTTON_ID_SELECT, prv_lane_down, NULL, NULL);
+
+  // DOWN is subscribed but is NOT a gameplay lane. It reports RB_LANE_NONE,
+  // which the menus act on -- moving the song selection, quitting from pause --
+  // and the playfield ignores outright.
+  window_raw_click_subscribe(BUTTON_ID_DOWN, prv_lane_down, NULL, NULL);
 
   // BACK must use single-click: pebble.h states the back button cannot take a
   // repeating, long or raw handler. That suits us -- BACK is never a gameplay

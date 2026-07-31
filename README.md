@@ -2,21 +2,28 @@
 
 A Taiko-style rhythm game for the Pebble Time 2.
 
+| Pick a song | Play | Results |
+|:---:|:---:|:---:|
+| ![Title screen: the song list with "Never Gonna Give You Up" selected](developer-portal/screenshots/emery/title.png) | ![Gameplay: notes travelling along two coloured lanes toward the target rings](developer-portal/screenshots/emery/game.png) | ![Results screen: rank S, 67450 points, 100% accuracy](developer-portal/screenshots/emery/result.png) |
+
+Captured on the emery emulator at 200x228, the watch's real size. Note that
+**it does not report colours faithfully** — #555500 comes back as #564E36 — so
+these read warmer and flatter than the watch does. See "Verifying a change".
+
 Horizontal lanes are stacked to match the physical buttons down the right edge
 of the watch. Notes ("pebbles") scroll left to right toward a fixed
 hit target beside the buttons; press that lane's button as a note arrives.
 
 ```
-  TOP lane    ->  UP button       (orange)
-  BOTTOM lane ->  DOWN button     (blue)
-  SELECT      ->  start / resume; never a lane
+  TOP lane    ->  UP button       (orange, badge points UP)
+  BOTTOM lane ->  SELECT button   (blue,   badge points RIGHT)
+  DOWN        ->  menus only; never a lane
   BACK        ->  pause / exit    (never used for gameplay)
 ```
 
 Two lanes rather than three: it is easier to play, and it turns the game into a
-two-handed alternation. The lanes keep the exact screen positions they had as
-part of a three-lane layout, because the buttons did not move -- see "Layout"
-below for why that is not the same as splitting the screen in half.
+two-handed alternation. See "Which buttons are the lanes" below — the answer has
+changed twice, and the reasoning matters more than the answer.
 
 Hits are judged Perfect / Good / Miss on timing accuracy, with a running score
 and combo counter.
@@ -181,30 +188,81 @@ pebble-rockbeat/
       you-are-not-alone.mid   song 2's melody (not bundled)
   tools/make_chart.py     regenerates chart.c AND music.c for EVERY song
   tools/extract_melody.py writes a melody .mid from a full arrangement
+  tools/pngkit.py         a supersampling RGBA canvas + PNG writer, stdlib only
+  tools/make_icon.py      menu icon (25px, ships) + store icons (80/144, do not)
+  tools/make_banner.py    the 720x320 appstore banner
+  developer-portal/       artwork for the store listing; none of it is bundled
 ```
 
-### Why the lanes are not half the screen each
+### Store artwork
 
-The lane bands are sized against a **three**-lane split even though two lanes are
-played, and `render.c` divides by `RB_LANE_SLOTS` (3) rather than by
-`RB_LANE_COUNT` (2). That looks like a leftover; it is not.
+Everything under `developer-portal/` is generated and uploaded by hand; only
+`watch/package.json`'s `media[]` decides what ships, and that is the 25x25 menu
+icon alone.
 
-The premise of the whole design is that a lane sits at the vertical position of
-the button that plays it, and **the buttons do not move when the game drops a
-lane**. Dividing the playfield by the lane count gives two 90 px bands centred at
-y=69 and y=159 — so the SELECT lane would sit 45 px below the SELECT button, and
-the game would be pointing at the wrong hardware. Keeping the 60 px bands leaves
-TOP on the UP button and MIDDLE on the screen's exact vertical centre where
-SELECT is, and the bottom third is simply left dark.
+```bash
+python3 tools/make_icon.py      # menu_icon.png + app_icon_80/144.png
+python3 tools/make_banner.py    # banner_720x320.png
+```
+
+Both draw from the same design geometry, so the store tile and the in-app icon
+cannot drift apart. Two size-specific decisions:
+
+- **The menu icon is black on transparent**, not white. The Pebble launcher
+  composites it over its own row background, and those rows are light — a white
+  mark is invisible there. Verified in the emulator's launcher, not assumed.
+- **The 80/144 store icons get the black rounded plate and the lane accent
+  colours.** They are app tiles in a list on a phone, where a bare silhouette
+  reads as nothing; the 25px icon is a silhouette on the watch, where a plate
+  would read as a box.
+
+The banner is drawn rather than screenshotted. A 200x228 screenshot has to be
+stretched 1.4x to reach 720x320, which turns 2px rails to mush, and the
+emulator's screenshot does not report the design's colours faithfully anyway
+(#555500 comes back as #564E36).
+
+`screenshots/emery/` holds the listing shots, which are the same files this
+README embeds at the top. **`game.gif` is stale** — it predates the move of the
+lower lane from DOWN to SELECT, so it still shows a down-pointing badge. Regenerating
+it means capturing a frame per `RB_DEBUG_FREEZE_AT_MS` value, which is one
+rebuild-install-wait cycle each; the stills cost one cycle and are current.
+`description.txt` is the listing copy.
+
+### Which buttons are the lanes
+
+Three arrangements have shipped, and the reasoning is worth keeping because each
+one traded away something real.
+
+1. **UP + SELECT**, with the lane bands placed at the buttons' own vertical
+   positions. The premise was that a lane sits where its button is, so the eye
+   never has to translate.
+2. **UP + DOWN**, when the UI was redrawn to the design. The two ends of the
+   button stack can both be found without looking, which SELECT — boxed in by
+   its neighbours — cannot.
+3. **UP + SELECT again**, which is what ships. The two ends of the stack are
+   easy to *find* but far apart to *alternate between*, and alternating at
+   sixteenth-note rates is the entire game. Adjacent buttons sit under one thumb.
+
+That last swap breaks premise 1: SELECT is the middle button, but the lane it
+plays is the lower band. The layout is the design's and does not move, so the
+mismatch is handled by never *claiming* otherwise — the lower lane's badge is a
+**right** arrow, the direction the notes travel, and never a down arrow, which
+would point squarely at the one button that does nothing during play.
 
 ## Controls
 
 | Screen | UP | SELECT | DOWN | BACK |
 |---|---|---|---|---|
 | Title | previous song | play selected song | next song | exit the app |
-| Playing | TOP lane | (ignored) | BOTTOM lane | pause |
+| Playing | TOP lane | BOTTOM lane | (ignored) | pause |
 | Paused | restart | resume | quit to title | quit to title |
 | Results | to title | to title | to title | to title |
+
+`input.c` reports which *lane* was struck, because that is all the playfield
+cares about; `main.c` reads the same value through `RB_BTN_UP` / `RB_BTN_SELECT`
+/ `RB_BTN_DOWN` for the menus, which care which *button* was pressed. Keeping
+that mapping in one place is what stops the next lane remap from silently
+swapping "play" and "quit" underneath the on-screen legends.
 
 Sound and haptics are always on — the buttons that once toggled them now choose
 the song, and a rhythm game with the sound off is not the thing anyway.
@@ -213,14 +271,13 @@ the song, and a rhythm game with the sound off is not the thing anyway.
 meaningless across songs of different length and density; one would permanently
 mask the other.
 
-DOWN is subscribed but is deliberately *not* a gameplay lane: with two lanes
-there is no third band for it to point at, and aliasing it onto one would break
-the rule that a lane sits at its button's vertical position. It reports a
-sentinel that the menus act on and the playfield ignores.
+DOWN is subscribed but is deliberately *not* a gameplay lane: there is no third
+band for it to point at. It reports a sentinel that the menus act on and the
+playfield ignores.
 
 ## The songs
 
-Two songs, chosen with UP/DOWN on the title screen. Each is generated from one
+Three songs, chosen with UP/DOWN on the title screen. Each is generated from one
 MIDI file — nothing is hand-placed, and there is no audio recording anywhere in
 the project.
 
@@ -647,6 +704,12 @@ So every interesting frame has to be reachable without pressing a button:
 | `RB_DEBUG_AUTOPLAY_MISS_EVERY` | drops every Nth note so the miss path and combo reset are visible |
 | `RB_DEBUG_FREEZE_AT_MS` | clamps the song clock to a chosen elapsed value, so a `~1s` screenshot round trip cannot miss the moment |
 | `RB_DEBUG_LOG_JUDGMENTS` | logs every judged press — this is how real button input gets verified, since `pebble logs` keeps working even if screenshots are wedged |
+
+The gameplay screenshot at the top of this file was taken that way: `AUTOSTART`
+and `AUTOPLAY` on, `FREEZE_AT_MS` 31050, then wait past that in real time before
+capturing — the freeze is in *song* time, so it only holds the frame once the
+song has actually reached it. `sleep N` alone cannot land on a chosen moment,
+which is the whole reason the freeze flag exists.
 
 ## SDK APIs: what was verified, and what was not
 

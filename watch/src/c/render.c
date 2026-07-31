@@ -63,16 +63,36 @@ static const char *prv_judgment_text(RbJudgment judgment) {
 // Primitives
 // ---------------------------------------------------------------------------
 
-// Drawn as stacked fill_rect rows rather than text: the Gothic system fonts
+// The badge inside a target ring: the arrow that names the lane's button.
+//
+// Drawn as stacked fill_rect strips rather than text: the Gothic system fonts
 // carry no arrow glyphs, so a literal triangle character renders as tofu. No
 // GPath either -- that would mean a heap allocation.
-static void prv_draw_triangle(GContext *ctx, int16_t cx, int16_t cy, int16_t half_w,
-                              int16_t h, bool pointing_up) {
-  for (int16_t i = 0; i < h; i++) {
-    const int16_t w = pointing_up ? (int16_t)((half_w * (i + 1)) / h)
-                                  : (int16_t)((half_w * (h - i)) / h);
-    graphics_fill_rect(ctx, GRect(cx - w, (int16_t)(cy - h / 2 + i), (int16_t)(w * 2 + 1), 1),
-                       0, GCornerNone);
+//
+// UP for the top lane and RIGHT for the bottom one. Not DOWN: the bottom lane is
+// played with SELECT, the MIDDLE button, so a down arrow would point squarely at
+// the one button that does nothing during play. Right is the direction the notes
+// themselves travel, which reads as "the near one" without naming a direction
+// that is wrong.
+static void prv_draw_arrow(GContext *ctx, int16_t cx, int16_t cy, bool pointing_up) {
+  if (pointing_up) {
+    for (int16_t i = 0; i < RB_ARROW_LEN; i++) {
+      const int16_t half = (int16_t)((RB_ARROW_HALF * (i + 1)) / RB_ARROW_LEN);
+      graphics_fill_rect(
+          ctx, GRect((int16_t)(cx - half), (int16_t)(cy - RB_ARROW_LEN / 2 + i),
+                     (int16_t)(half * 2 + 1), 1),
+          0, GCornerNone);
+    }
+    return;
+  }
+
+  // Same triangle with the axes swapped: columns narrowing left to right.
+  for (int16_t i = 0; i < RB_ARROW_LEN; i++) {
+    const int16_t half = (int16_t)((RB_ARROW_HALF * (RB_ARROW_LEN - i)) / RB_ARROW_LEN);
+    graphics_fill_rect(
+        ctx, GRect((int16_t)(cx - RB_ARROW_LEN / 2 + i), (int16_t)(cy - half), 1,
+                   (int16_t)(half * 2 + 1)),
+        0, GCornerNone);
   }
 }
 
@@ -179,7 +199,7 @@ static void prv_draw_targets(GContext *ctx, uint32_t elapsed_ms) {
       graphics_context_set_stroke_width(ctx, 1);
 
       graphics_context_set_fill_color(ctx, accent);
-      prv_draw_triangle(ctx, centre.x, centre.y, 8, 12, lane == RB_LANE_TOP);
+      prv_draw_arrow(ctx, centre.x, centre.y, lane == RB_LANE_TOP);
       continue;
     }
 

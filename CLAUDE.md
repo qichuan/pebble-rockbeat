@@ -276,9 +276,21 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   derived from `layer_get_bounds()` any more: the design was composed at 200x228
   for this screen, and deriving them would only invent a layout nobody drew. The
   width still comes from bounds so right-hand furniture stays anchored.
-  - SELECT is deliberately NOT a lane. UP and DOWN are the two ends of the button
-    stack and can both be found without looking, which SELECT -- boxed in by its
-    neighbours -- cannot. This replaced the older UP+SELECT pairing.
+  - **The lanes are UP and SELECT; DOWN is not a lane.** Three arrangements have
+    shipped and the current one deliberately BREAKS the "lane sits at its
+    button's vertical position" rule: SELECT is the middle button and it plays
+    the lower band. Adjacent buttons won over aligned ones because alternating
+    at sixteenth-note rates is the game, and the ends of the stack are easy to
+    find but slow to alternate between. README's "Which buttons are the lanes"
+    has the full history -- read it before changing this again.
+  - Because of that, the lower lane's badge is a **RIGHT** arrow
+    (`prv_draw_arrow` in render.c), never a down one: a down arrow would point at
+    the one button that does nothing during play. Right is the direction the
+    notes travel, which names no button at all.
+  - `main.c` reads the lane value through `RB_BTN_UP`/`RB_BTN_SELECT`/
+    `RB_BTN_DOWN` for its menus. `input.c` reports LANES; the menus need BUTTONS.
+    One mapping in one place, so a future remap cannot silently swap "play" and
+    "quit" underneath render.c's on-screen legends.
   - `RB_LANE_MID` was renamed `RB_LANE_BOT`. `LANE_NAMES` in make_chart.py must
     stay bottom-most-first: `build_chart()` puts notes above the melody's median
     in lane 1, and the higher pitch has to land in the higher lane.
@@ -437,11 +449,10 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   title screen, which is where the song selector now is. `save.c` no longer
   stores them.
 
-- **DOWN is subscribed again, but it is NOT a lane.** It reports `RB_LANE_NONE`
+- **DOWN is subscribed, but it is NOT a lane.** It reports `RB_LANE_NONE`
   (0xFF, deliberately outside the `RbLane` enum so it can never index a
   lane-sized array). Menus use it to move the selection; `main.c` ignores it
-  during play. Do not alias it onto a lane — the layout premise is that a lane
-  sits at its button's vertical position, and there is no third band.
+  during play. Do not alias it onto a lane — there is no third band.
 
 - **Music chunks are bounded in MILLISECONDS, not bars** (`CHUNK_MAX_MS`). Bars
   were the unit until a song at half the tempo made 8 bars 32.5s instead of
@@ -490,9 +501,26 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   snare puts that alternation *across* the lanes: 56/56 and 100% hand
   alternation.
 
-- **Resources are 4,213 bytes** — the menu icon. The app is now publishable
+- **Resources are ~4.2 KB** — the menu icon. The app is now publishable
   (previously 893.9 KB against the 256 KB store limit). Keep it that way: do not
   re-add a PCM music resource.
+
+- **The menu icon is BLACK on transparent, and that was measured.** The obvious
+  choice is white — the design specifies white, and Pebble's own docs suggest it
+  — but the emery launcher composites the icon over LIGHT rows, so white
+  disappears. Checked by installing and screenshotting the launcher list, not by
+  reading docs. The SDK converts it to a 1-bit greyscale PNG with a `tRNS`
+  marking the background transparent, so the black survives intact into the pbw.
+
+- **Store artwork is generated, and none of it ships.** `tools/make_icon.py`
+  writes the 25px menu icon AND the 80/144 store tiles from one geometry;
+  `tools/make_banner.py` writes the 720x320 store banner; both sit on
+  `tools/pngkit.py`, a stdlib supersampling canvas. Only `package.json`'s
+  `media[]` decides what is bundled, so `developer-portal/` costs the app zero
+  bytes. The banner is DRAWN, not screenshotted: 200x228 stretched to 720x320
+  destroys the 2px rails, and the emulator misreports the colours anyway.
+  Antialiasing there is free (it runs once, on a laptop) — do not take that as
+  licence to turn it on in `render.c`, where it is paid per pixel 25x a second.
 
 - **The back button cannot take a raw, long, or repeating click handler**
   (`pebble.h:97-98`). Single-click only. Fine here — BACK is never gameplay.

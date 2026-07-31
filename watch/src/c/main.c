@@ -126,7 +126,17 @@ static void prv_lane_hit(uint8_t lane, uint32_t press_now_ms) {
 // ---------------------------------------------------------------------------
 // Input dispatch -- one provider serves every screen; the handlers branch on
 // game_screen() rather than re-subscribing on each transition.
+//
+// input.c reports which LANE was struck, because that is all the playfield
+// cares about. The menus care which BUTTON was pressed, so they read the same
+// value through these names. Keeping the mapping in one place is what stops a
+// future lane remap from silently swapping "play" and "quit" underneath the
+// on-screen legends in render.c.
 // ---------------------------------------------------------------------------
+
+#define RB_BTN_UP     RB_LANE_TOP
+#define RB_BTN_SELECT RB_LANE_BOT
+#define RB_BTN_DOWN   RB_LANE_NONE
 
 static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
   switch (game_screen()) {
@@ -138,12 +148,12 @@ static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
 
     case RB_SCREEN_TITLE:
       // UP and DOWN move the selection, matching the buttons' physical order --
-      // UP goes up the list. SELECT, which is not a lane, plays what is chosen.
-      if (lane == RB_LANE_NONE) {
+      // UP goes up the list. SELECT plays what is chosen.
+      if (lane == RB_BTN_SELECT) {
         prv_start_song();
       } else {
         const uint8_t count = chart_count();
-        if (lane == RB_LANE_TOP) {
+        if (lane == RB_BTN_UP) {
           s_song = (uint8_t)((s_song + count - 1) % count);
         } else {
           s_song = (uint8_t)((s_song + 1) % count);
@@ -164,9 +174,9 @@ static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
       break;
 
     case RB_SCREEN_PAUSED:
-      if (lane == RB_LANE_NONE) {
+      if (lane == RB_BTN_SELECT) {
         prv_resume();
-      } else if (lane == RB_LANE_TOP) {
+      } else if (lane == RB_BTN_UP) {
         prv_start_song();
       } else {
         prv_enter_title();

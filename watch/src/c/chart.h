@@ -19,27 +19,30 @@
 // walking 0..RB_LANE_COUNT downward, and everything else is sized from
 // RB_LANE_COUNT rather than from the number 3.
 //
-// Two lanes, on the two EXTREMES of the button stack rather than two adjacent
-// buttons. UP and DOWN can both be found without looking, which SELECT -- boxed
-// in by its neighbours -- cannot; the design calls this out explicitly and it is
-// worth the dead button in the middle.
+// Two lanes, played with UP and SELECT -- the top two buttons, adjacent. The
+// thumb rests across both, so alternating hands at sixteenth-note rates does not
+// require travelling the length of the button stack, which UP+DOWN did.
 //
-// This supersedes the older arrangement of UP + SELECT. SELECT is now idle
-// during play, which also frees it to mean one unambiguous thing everywhere
-// else: on the title screen it starts the song, and UP/DOWN choose it.
+// The cost is that lane 1 breaks the "a lane sits at its button's vertical
+// position" rule: SELECT is the middle button and the lower lane is the lower
+// band. Nothing on screen may therefore claim otherwise -- in particular the
+// lower lane's badge is a RIGHT arrow, never a DOWN one, because a down arrow
+// would point at the button that is not a lane. Both earlier arrangements are
+// recorded in README.md.
 //
 // Note the knock-on effect documented in tools/make_chart.py: with only two
 // lanes the same-lane spacing rule leaves offbeats nowhere legal to go.
 typedef enum {
   RB_LANE_TOP = 0,  // UP button
-  RB_LANE_BOT,      // DOWN button
+  RB_LANE_BOT,      // SELECT button
   RB_LANE_COUNT,
 } RbLane;
 
-// Reported for a button press that is not a gameplay lane -- SELECT, which
-// starts and resumes but never hits a note. Deliberately outside the enum:
-// it must never index a lane-sized array, and every consumer has to decide what
-// to do with it rather than silently treating it as lane 0.
+// Reported for a button press that is not a gameplay lane -- DOWN, which moves
+// the song selection and quits from the pause screen but never hits a note.
+// Deliberately outside the enum: it must never index a lane-sized array, and
+// every consumer has to decide what to do with it rather than silently treating
+// it as lane 0.
 #define RB_LANE_NONE 0xFF
 
 typedef enum {
