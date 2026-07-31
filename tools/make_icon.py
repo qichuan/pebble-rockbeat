@@ -13,10 +13,16 @@ Only the 25x25 is a resource -- see package.json's media[], which is the whole
 of what gets bundled. The other two are uploaded to the Pebble developer portal
 by hand and cost the app nothing.
 
-The mark is the game itself in miniature: two lanes as horizontal bars, with a
-note sitting at the end of each. That is why the bars are different lengths --
-the notes are at different points along their lanes, which is what the screen
-always looks like.
+The mark is the game itself in miniature: two lanes as horizontal bars, each
+running into the hit target at its end. That is why the bars are different
+lengths -- the two targets sit at different points across the mark, which is
+what gives it a diagonal rather than the stacked look of a list row.
+
+The targets are HOLLOW rings, and that is the whole point of the silhouette. A
+horizontal bar ending in a SOLID knob is the universal settings-sliders glyph,
+so the earlier mark -- two bars with a filled dot on each -- read as a settings
+icon in the launcher list and vanished among the system apps. Hollow is what
+distinguishes it, because a slider knob is never hollow.
 
 The two sizes are drawn DIFFERENTLY on purpose, because they are seen
 differently. At 25px the icon is a silhouette on the watch's own launcher, so it
@@ -44,11 +50,12 @@ STORE_DIR = ROOT / "developer-portal/app_icon"
 # from these four numbers so the large icons cannot drift from the small one.
 # ---------------------------------------------------------------------------
 
-BARS = ((3, 8, 11, 3), (3, 15, 15, 3))    # (x, y, w, h) -- the two lanes
-DOTS = ((16, 9, 3), (20, 16, 3))          # (cx, cy, r)  -- the note on each
+BARS = ((1, 6, 8, 3), (1, 16, 11, 3))     # (x, y, w, h) -- the two lanes
+RINGS = ((13, 7, 6, 2), (17, 17, 6, 2))   # (cx, cy, r, width) -- the hit target
 
-# The white ring the design puts round each note in the large icons, in the same
-# 25-unit space. 0.9 units lands on 5px at 144, which is what the design says.
+# The white outline the design puts round each target in the large icons, in the
+# same 25-unit space. 0.9 units lands on 5px at 144, which is what the design
+# says.
 RING_U = 0.9
 
 MENU_SIZE = 25
@@ -69,7 +76,7 @@ def _mark_bounds() -> tuple[float, float, float, float]:
     for bx, by, bw, bh in BARS:
         xs += [bx, bx + bw]
         ys += [by, by + bh]
-    for cx, cy, r in DOTS:
+    for cx, cy, r, _width in RINGS:
         xs += [cx - r - RING_U, cx + r + RING_U]
         ys += [cy - r - RING_U, cy + r + RING_U]
     return min(xs), min(ys), max(xs), max(ys)
@@ -87,14 +94,16 @@ def draw_menu_icon() -> Canvas:
     not get to choose.
 
     ss=1, i.e. no antialiasing: at 25px a soft edge just looks muddy, and the
-    firmware quantises the icon anyway. `bias=r` on the discs reproduces the
-    watch's own circle fill so the shape matches what render.c draws.
+    SDK quantises this to 1-bit greyscale plus a tRNS anyway, so no grey would
+    survive to be muddy with. `bias=r` on the rings reproduces the watch's own
+    circle fill so the shape matches what render.c draws -- and without it the
+    pole of each ring is a single pixel, which reads as a speck.
     """
     c = Canvas(MENU_SIZE, MENU_SIZE, ss=1)
     for bx, by, bw, bh in BARS:
         c.rect(bx, by, bw, bh, pngkit.BLACK)
-    for cx, cy, r in DOTS:
-        c.circle(cx, cy, r, pngkit.BLACK, bias=r)
+    for cx, cy, r, width in RINGS:
+        c.ring(cx, cy, r, width, pngkit.BLACK, bias=r)
     return c
 
 
@@ -126,10 +135,16 @@ def draw_store_icon(size: int) -> Canvas:
         h = sy(by + bh) - sy(by)
         c.round_rect(sx(bx), sy(by), sx(bx + bw) - sx(bx), h, h // 2, accent)
 
-    for accent, (cx, cy, r) in zip(accents, DOTS):
+    # Hollow here too. The geometry describes a hit target, not a note dot, so
+    # filling it would make the tile a fat blob with no relation to the 25px
+    # silhouette -- and the two are meant to be the same mark.
+    for accent, (cx, cy, r, width) in zip(accents, RINGS):
         radius = round(r * scale)
-        c.circle(sx(cx), sy(cy), radius + ring, pngkit.WHITE)
-        c.circle(sx(cx), sy(cy), radius, accent)
+        wpx = max(1, round(width * scale))
+        # White first, wider on both edges, so the accent annulus keeps an
+        # outline against the black plate exactly as the bars keep theirs.
+        c.ring(sx(cx), sy(cy), radius + ring, wpx + 2 * ring, pngkit.WHITE)
+        c.ring(sx(cx), sy(cy), radius, wpx, accent)
 
     return c
 

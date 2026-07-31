@@ -216,6 +216,13 @@ cannot drift apart. Two size-specific decisions:
 - **The menu icon is black on transparent**, not white. The Pebble launcher
   composites it over its own row background, and those rows are light — a white
   mark is invisible there. Verified in the emulator's launcher, not assumed.
+- **The hit targets are hollow, and that is what makes the icon readable as a
+  game.** The mark used to be two lane bars with a *filled* dot at the end of
+  each, which is the universal settings-sliders glyph — the most common shape in
+  any app list, so it read as a settings icon and disappeared among the system
+  apps. A slider knob is never hollow, so rings are what tell them apart. The
+  same change also took the mark from 23% ink in a 21×14 box to 34% filling
+  23×23 of the 25×25 canvas, which is the other half of why it now carries.
 - **The 80/144 store icons get the black rounded plate and the lane accent
   colours.** They are app tiles in a list on a phone, where a bare silhouette
   reads as nothing; the 25px icon is a silhouette on the watch, where a plate

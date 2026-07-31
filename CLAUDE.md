@@ -540,6 +540,18 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   disappears. Checked by installing and screenshotting the launcher list, not by
   reading docs. The SDK converts it to a 1-bit greyscale PNG with a `tRNS`
   marking the background transparent, so the black survives intact into the pbw.
+  - **The hit targets are HOLLOW rings, for the same kind of reason.** A
+    horizontal bar ending in a SOLID knob is the universal settings-sliders
+    glyph, and the original mark was two lane bars with a filled dot on each —
+    so the silhouette read as a settings icon and vanished among the system apps
+    in the launcher list. A slider knob is never hollow; that is the whole
+    distinction. Do not "simplify" the rings back to discs. The mark was also
+    grown from 23% ink in a 21x14 box to 34% filling 23x23 of the 25x25 canvas.
+  - **`pngkit.ring()` needs `bias=r` at `ss=1`.** With the exact `r*r` outer
+    edge the pole rows of a ring are a single pixel, which at 25px reads as a
+    speck floating above the ring rather than part of it. `bias` widens the
+    OUTER edge only — biasing the inner one would eat the hole. It defaults to 0
+    so `make_banner.py`, which draws supersampled, is unaffected.
 
 - **Store artwork is generated, and none of it ships.** `tools/make_icon.py`
   writes the 25px menu icon AND the 80/144 store tiles from one geometry;

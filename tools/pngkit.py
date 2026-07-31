@@ -114,17 +114,24 @@ class Canvas:
             self._span(cxs - half, cxs + half + 1, yy, rgb)
 
     def ring(self, cx: int, cy: int, r: int, width: int,
-             rgb: tuple[int, int, int]) -> None:
+             rgb: tuple[int, int, int], bias: int = 0) -> None:
         """An annulus, drawn directly rather than as two circles.
 
         Two circles would need to know what colour sits inside the ring, which
         in the banner is a lane bed in one place and black in another.
+
+        `bias` widens the OUTER edge only, exactly as it does on circle(): at
+        ss=1 an exact r*r edge makes the pole rows a single pixel, which at 25px
+        reads as a speck sitting above the ring rather than as part of it.
+        Passing bias=r gives the watch's own `<= r*r + r` fill and a round pole.
+        The inner edge stays exact -- biasing it too would eat the hole.
         """
         s = self.ss
         cxs, cys, rs, inner = cx * s, cy * s, r * s, (r - width) * s
+        outer_limit = rs * rs + bias * s * s
         for yy in range(cys - rs, cys + rs + 1):
             dy2 = (yy - cys) ** 2
-            outer_half = _isqrt_clamped(rs * rs - dy2)
+            outer_half = _isqrt_clamped(outer_limit - dy2)
             if dy2 >= inner * inner:
                 self._span(cxs - outer_half, cxs + outer_half + 1, yy, rgb)
             else:
