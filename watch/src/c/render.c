@@ -1,92 +1,58 @@
 #include "render.h"
 
-#include "audio.h"
 #include "chart.h"
 #include "feedback.h"
 #include "game.h"
 #include "rb_config.h"
 #include "save.h"
 
-// ---------------------------------------------------------------------------
-// Layout
-//
-// Recomputed from layer_get_bounds() every frame rather than hardcoded, so the
-// 200x228 emery geometry is a consequence of the constants rather than baked
-// into them.
-// ---------------------------------------------------------------------------
-
-typedef struct {
-  GRect bounds;
-  int16_t lane_h;
-  int16_t lane_top[RB_LANE_COUNT];
-  int16_t lane_cy[RB_LANE_COUNT];
-  int16_t target_cx;
-} RbLayout;
-
-// Lane bands are sized against a THREE-lane split even though only two lanes
-// are played, and this is deliberate.
-//
-// The whole ergonomic premise is that a lane sits at the vertical position of
-// the button that plays it. The buttons do not move when the game drops a lane:
-// UP, SELECT and DOWN stay where they are on the case, with SELECT on the
-// screen's exact vertical centre. Dividing the playfield by RB_LANE_COUNT
-// instead -- the obvious change -- gives two 90px bands centred at y=69 and
-// y=159, so the SELECT lane would sit 45px BELOW the SELECT button and the game
-// would be pointing at the wrong hardware.
-//
-// So the geometry stays keyed to the button positions, and the space the third
-// lane used to occupy is simply left out of the playfield.
-#define RB_LANE_SLOTS 3
-
-static RbLayout prv_layout(Layer *layer) {
-  RbLayout lay;
-  lay.bounds = layer_get_bounds(layer);
-  lay.lane_h = (int16_t)((lay.bounds.size.h - RB_HUD_TOP_H - RB_HUD_BOT_H) / RB_LANE_SLOTS);
-  for (uint8_t i = 0; i < RB_LANE_COUNT; i++) {
-    lay.lane_top[i] = (int16_t)(RB_HUD_TOP_H + i * lay.lane_h);
-    lay.lane_cy[i] = (int16_t)(lay.lane_top[i] + lay.lane_h / 2);
-  }
-  lay.target_cx = (int16_t)(lay.bounds.size.w - RB_TARGET_INSET_R);
-  return lay;
-}
 
 // ---------------------------------------------------------------------------
 // Palette
 //
-// Compound-literal GColor macros are not constant expressions, so these are
-// switch functions rather than static const arrays.
+// Colours are built from their 8-bit ARGB value rather than looked up by name.
+// The design specifies hex, and every colour in it is already on the 64-colour
+// grid -- two bits per channel, each pair meaning 0/85/170/255 -- so the byte is
+// an exact, mechanical transcription of the hex: 0b11 then RR GG BB.
+//
+// Doing it by name invites silent mistakes. Grepping gcolor_definitions.h for
+// these values returned confident, WRONG answers (it named #555500 "Indigo"),
+// and a wrong colour constant is not something a build catches.
 // ---------------------------------------------------------------------------
 
+#define RB_ARGB(byte) ((GColor8){ .argb = (uint8_t)(byte) })
+
+#define RB_C_LANE_TOP_BED   RB_ARGB(0b11010100)  // #555500 olive
+#define RB_C_LANE_TOP_RAIL  RB_ARGB(0b11100100)  // #AA5500
+#define RB_C_LANE_TOP_ACC   RB_ARGB(0b11111000)  // #FFAA00 orange
+#define RB_C_LANE_BOT_BED   RB_ARGB(0b11000101)  // #005555 teal
+#define RB_C_LANE_BOT_RAIL  RB_ARGB(0b11000110)  // #0055AA
+#define RB_C_LANE_BOT_ACC   RB_ARGB(0b11001011)  // #00AAFF blue
+
+// One record colour per song, so the art tile is not the same plate every time.
+static GColor prv_song_art(uint8_t song) {
+  switch (song) {
+    case 1:  return RB_ARGB(0b11000110);  // #0055AA
+    case 2:  return RB_ARGB(0b11100100);  // #AA5500
+    default: return RB_ARGB(0b11100001);  // #AA0055
+  }
+}
+
 static GColor prv_lane_accent(uint8_t lane) {
-  switch (lane) {
-    case RB_LANE_TOP: return GColorPictonBlue;
-    case RB_LANE_MID: return GColorRed;
-    default:          return GColorYellow;
-  }
+  return (lane == RB_LANE_TOP) ? RB_C_LANE_TOP_ACC : RB_C_LANE_BOT_ACC;
 }
 
-// Dark beds that tint toward each lane's accent, so a glance at any row tells
-// you which button it belongs to even with no note on screen.
 static GColor prv_lane_bed(uint8_t lane) {
-  switch (lane) {
-    case RB_LANE_TOP: return GColorOxfordBlue;
-    case RB_LANE_MID: return GColorBulgarianRose;
-    default:          return GColorArmyGreen;
-  }
+  return (lane == RB_LANE_TOP) ? RB_C_LANE_TOP_BED : RB_C_LANE_BOT_BED;
 }
 
-static GColor prv_judgment_color(RbJudgment judgment) {
-  switch (judgment) {
-    case RB_JUDGE_PERFECT: return GColorYellow;
-    case RB_JUDGE_GOOD:    return GColorBrightGreen;
-    case RB_JUDGE_MISS:    return GColorLightGray;
-    default:               return GColorWhite;
-  }
+static GColor prv_lane_rail(uint8_t lane) {
+  return (lane == RB_LANE_TOP) ? RB_C_LANE_TOP_RAIL : RB_C_LANE_BOT_RAIL;
 }
 
 static const char *prv_judgment_text(RbJudgment judgment) {
   switch (judgment) {
-    case RB_JUDGE_PERFECT: return "PERFECT";
+    case RB_JUDGE_PERFECT: return "PERFECT!";
     case RB_JUDGE_GOOD:    return "GOOD";
     case RB_JUDGE_MISS:    return "MISS";
     default:               return "";
@@ -110,20 +76,6 @@ static void prv_draw_triangle(GContext *ctx, int16_t cx, int16_t cy, int16_t hal
   }
 }
 
-// The button this lane belongs to, drawn in the right margin beside the real
-// buttons: a caret up for UP, a dot for SELECT, a caret down for DOWN.
-static void prv_draw_lane_badge(GContext *ctx, const RbLayout *lay, uint8_t lane) {
-  const int16_t cx = (int16_t)(lay->bounds.size.w - 7);
-  const int16_t cy = lay->lane_cy[lane];
-
-  graphics_context_set_fill_color(ctx, prv_lane_accent(lane));
-  switch (lane) {
-    case RB_LANE_TOP: prv_draw_triangle(ctx, cx, cy, 5, 9, true); break;
-    case RB_LANE_MID: graphics_fill_circle(ctx, GPoint(cx, cy), 4); break;
-    default:          prv_draw_triangle(ctx, cx, cy, 5, 9, false); break;
-  }
-}
-
 static void prv_draw_text(GContext *ctx, const char *text, const char *font_key, GRect box,
                           GTextAlignment align, GColor color) {
   graphics_context_set_text_color(ctx, color);
@@ -131,174 +83,15 @@ static void prv_draw_text(GContext *ctx, const char *text, const char *font_key,
                      GTextOverflowModeTrailingEllipsis, align, NULL);
 }
 
-// ---------------------------------------------------------------------------
-// Playfield
-// ---------------------------------------------------------------------------
-
-static void prv_draw_lanes(GContext *ctx, const RbLayout *lay) {
-  for (uint8_t lane = 0; lane < RB_LANE_COUNT; lane++) {
-    graphics_context_set_fill_color(ctx, prv_lane_bed(lane));
-    graphics_fill_rect(ctx, GRect(0, lay->lane_top[lane], lay->bounds.size.w, lay->lane_h),
-                       0, GCornerNone);
-
-    // A one-pixel black rule between lanes keeps the three beds from reading as
-    // a single gradient.
-    graphics_context_set_fill_color(ctx, GColorBlack);
-    graphics_fill_rect(ctx, GRect(0, lay->lane_top[lane], lay->bounds.size.w, 1), 0, GCornerNone);
-  }
+static void prv_fill(GContext *ctx, GRect rect, GColor color) {
+  graphics_context_set_fill_color(ctx, color);
+  graphics_fill_rect(ctx, rect, 0, GCornerNone);
 }
 
-static void prv_draw_targets(GContext *ctx, const RbLayout *lay, uint32_t elapsed_ms) {
-  for (uint8_t lane = 0; lane < RB_LANE_COUNT; lane++) {
-    const GPoint centre = GPoint(lay->target_cx, lay->lane_cy[lane]);
-    const RbJudgment flash = feedback_lane_flash(lane, elapsed_ms);
-
-    // A dark disc under the ring so a note crossing the target stays legible
-    // against the lane bed.
-    graphics_context_set_fill_color(ctx, GColorBlack);
-    graphics_fill_circle(ctx, centre, RB_TARGET_R);
-
-    if (flash != RB_JUDGE_NONE) {
-      graphics_context_set_fill_color(ctx, prv_judgment_color(flash));
-      graphics_fill_circle(ctx, centre, RB_TARGET_R - RB_TARGET_RING_W);
-    }
-
-    graphics_context_set_stroke_color(ctx, prv_lane_accent(lane));
-    graphics_context_set_stroke_width(ctx, RB_TARGET_RING_W);
-    graphics_draw_circle(ctx, centre, RB_TARGET_R);
-    graphics_context_set_stroke_width(ctx, 1);
-  }
-}
-
-// x = target - (time until the note is due) * speed. A note still in the future
-// has a positive delta and therefore sits left of the target; the note reaches
-// the target exactly when delta hits zero. This single line is the whole
-// relationship between the song clock and the picture.
-static int16_t prv_note_x(int16_t target_cx, int32_t delta_ms) {
-  return (int16_t)(target_cx - (delta_ms * RB_SCROLL_PX_PER_SEC) / 1000);
-}
-
-static void prv_draw_notes(GContext *ctx, const RbLayout *lay, uint32_t elapsed_ms) {
-  const Chart *const chart = game_chart();
-  if (chart == NULL) {
-    return;
-  }
-
-  const int16_t cull_left = -RB_CULL_MARGIN;
-  const int16_t cull_right = (int16_t)(lay->bounds.size.w + RB_CULL_MARGIN);
-
-  // Scanning forward from the live cursor, hit times ascend, so x descends
-  // monotonically -- the first note off the left edge ends the loop and nothing
-  // ever walks the whole chart.
-  for (uint16_t i = game_first_live(); i < chart->note_count; i++) {
-    const ChartNote *const note = &chart->notes[i];
-    const int32_t delta_ms = (int32_t)note->hit_time_ms - (int32_t)elapsed_ms;
-    const int16_t x = prv_note_x(lay->target_cx, delta_ms);
-
-    if (x < cull_left) {
-      break;
-    }
-    if (x > cull_right || game_note_judgment(i) != RB_JUDGE_NONE) {
-      continue;  // already resolved: hit notes vanish, missed notes are dropped
-    }
-
-    const bool big = (note->type == RB_NOTE_BIG);
-    const int16_t r = big ? RB_NOTE_R_BIG : RB_NOTE_R_NORMAL;
-    const GPoint centre = GPoint(x, lay->lane_cy[note->lane]);
-
-    graphics_context_set_fill_color(ctx, prv_lane_accent(note->lane));
-    graphics_fill_circle(ctx, centre, r);
-
-    // Big notes get a white outline as well as extra radius, so they are
-    // distinguishable by shape and not by colour alone.
-    graphics_context_set_stroke_color(ctx, GColorWhite);
-    graphics_context_set_stroke_width(ctx, big ? 3 : 1);
-    graphics_draw_circle(ctx, centre, r);
-    graphics_context_set_stroke_width(ctx, 1);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// HUD
-// ---------------------------------------------------------------------------
-
-static void prv_draw_hud(GContext *ctx, const RbLayout *lay, uint32_t elapsed_ms) {
-  const Chart *const chart = game_chart();
-  const int16_t w = lay->bounds.size.w;
-
-  // Progress bar across the very top.
-  graphics_context_set_fill_color(ctx, GColorDarkGray);
-  graphics_fill_rect(ctx, GRect(0, 0, w, 3), 0, GCornerNone);
-  if (chart != NULL && chart->end_ms > 0) {
-    uint32_t done = ((uint32_t)w * elapsed_ms) / chart->end_ms;
-    if (done > (uint32_t)w) {
-      done = (uint32_t)w;
-    }
-    graphics_context_set_fill_color(ctx, GColorWhite);
-    graphics_fill_rect(ctx, GRect(0, 0, (int16_t)done, 3), 0, GCornerNone);
-  }
-
-  char score_buf[12];
-  snprintf(score_buf, sizeof(score_buf), "%lu", (unsigned long)game_score());
-  prv_draw_text(ctx, score_buf, FONT_KEY_GOTHIC_18_BOLD, GRect(4, 2, w - 8, 20),
-                GTextAlignmentLeft, GColorWhite);
-
-  const RbJudgment last = feedback_last_judgment(elapsed_ms);
-  if (last != RB_JUDGE_NONE) {
-    prv_draw_text(ctx, prv_judgment_text(last), FONT_KEY_GOTHIC_14_BOLD,
-                  GRect(4, 6, w - 8, 18), GTextAlignmentRight, prv_judgment_color(last));
-  }
-
-  // Combo, bottom band. Only shown from 2 upward -- "x1" on every single note
-  // is noise.
-  const int16_t foot_y = (int16_t)(lay->bounds.size.h - RB_HUD_BOT_H);
-  const uint16_t combo = game_combo();
-  if (combo >= 2) {
-    char combo_buf[12];
-    snprintf(combo_buf, sizeof(combo_buf), "x%u", (unsigned)combo);
-    prv_draw_text(ctx, combo_buf, FONT_KEY_GOTHIC_18_BOLD, GRect(4, foot_y + 1, w - 8, 22),
-                  GTextAlignmentLeft, combo >= 10 ? GColorYellow : GColorWhite);
-  }
-
-  char tally_buf[24];
-  snprintf(tally_buf, sizeof(tally_buf), "%u/%u/%u", (unsigned)game_count(RB_JUDGE_PERFECT),
-           (unsigned)game_count(RB_JUDGE_GOOD), (unsigned)game_count(RB_JUDGE_MISS));
-  prv_draw_text(ctx, tally_buf, FONT_KEY_GOTHIC_14, GRect(4, foot_y + 4, w - 8, 20),
-                GTextAlignmentRight, GColorLightGray);
-}
-
-// ---------------------------------------------------------------------------
-// Title / pause / results
-// ---------------------------------------------------------------------------
-
-static void prv_draw_play(GContext *ctx, const RbLayout *lay) {
-  const uint32_t elapsed_ms = game_elapsed_ms();
-
-  prv_draw_lanes(ctx, lay);
-  prv_draw_targets(ctx, lay, elapsed_ms);
-  prv_draw_notes(ctx, lay, elapsed_ms);
-  for (uint8_t lane = 0; lane < RB_LANE_COUNT; lane++) {
-    prv_draw_lane_badge(ctx, lay, lane);
-  }
-  prv_draw_hud(ctx, lay, elapsed_ms);
-}
-
-// A translucent-looking scrim: emery has alpha in GColor, but filling a large
-// rect with a 33% alpha colour is slower than a solid panel and reads muddier on
-// the real display, so the playfield is dimmed with a solid panel instead.
-static void prv_draw_panel(GContext *ctx, GRect box) {
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, box, 6, GCornersAll);
-  graphics_context_set_stroke_color(ctx, GColorWhite);
-  graphics_context_set_stroke_width(ctx, 2);
-  graphics_draw_round_rect(ctx, box, 6);
-  graphics_context_set_stroke_width(ctx, 1);
-}
-
-// Which song the title screen is showing, derived from the chart that is loaded
+// The song the title screen has selected, derived from the chart that is loaded
 // rather than tracked separately. game_chart() is always one of the entries in
 // the chart table, so a pointer match IS the index -- and it cannot drift out of
-// step with the title being drawn the way a second copy of the index could.
+// step with what is being drawn the way a second copy of the index could.
 static uint8_t prv_selected_song(void) {
   const Chart *const chart = game_chart();
   for (uint8_t i = 0; i < chart_count(); i++) {
@@ -309,25 +102,269 @@ static uint8_t prv_selected_song(void) {
   return 0;
 }
 
-static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
-  const int16_t w = lay->bounds.size.w;
+// ---------------------------------------------------------------------------
+// HUD -- score left, combo right
+// ---------------------------------------------------------------------------
 
-  // Keep the lane beds behind the title so the colour-to-button mapping is
-  // already learnable before the song starts.
-  prv_draw_lanes(ctx, lay);
+static void prv_draw_hud(GContext *ctx, GRect bounds) {
+  const int16_t w = bounds.size.w;
+
+  graphics_context_set_antialiased(ctx, false);
+  prv_fill(ctx, bounds, GColorBlack);
+
+  prv_draw_text(ctx, "SCORE", FONT_KEY_GOTHIC_14, GRect(7, -3, 90, 18),
+                GTextAlignmentLeft, GColorLightGray);
+
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%lu", (unsigned long)game_score());
+  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_24_BOLD, GRect(7, 13, 110, 32),
+                GTextAlignmentLeft, GColorWhite);
+
+  // The combo is the loudest thing on the screen by design -- a big yellow
+  // numeral with its label tucked underneath.
+  snprintf(buf, sizeof(buf), "%u", (unsigned)game_combo());
+  prv_draw_text(ctx, buf, FONT_KEY_LECO_32_BOLD_NUMBERS,
+                GRect((int16_t)(w - 98), -6, 90, 42), GTextAlignmentRight, GColorYellow);
+  prv_draw_text(ctx, "COMBO", FONT_KEY_GOTHIC_14, GRect((int16_t)(w - 98), 35, 90, 18),
+                GTextAlignmentRight, GColorWhite);
+}
+
+// ---------------------------------------------------------------------------
+// Field -- lanes, notes, targets, popup
+//
+// Layer-local coordinates: the layer's origin is the top of the upper lane, so
+// the lane tops are 0 and RB_LANE_BOT_Y - RB_LANE_TOP_Y.
+// ---------------------------------------------------------------------------
+
+static int16_t prv_lane_y(uint8_t lane) {
+  return (lane == RB_LANE_TOP) ? RB_LANE_TOP_Y : RB_LANE_BOT_Y;
+}
+
+static int16_t prv_lane_cy(uint8_t lane) {
+  return (int16_t)(prv_lane_y(lane) + RB_LANE_H / 2);
+}
+
+static void prv_draw_lane_beds(GContext *ctx, int16_t w) {
   for (uint8_t lane = 0; lane < RB_LANE_COUNT; lane++) {
-    prv_draw_lane_badge(ctx, lay, lane);
+    const int16_t y = prv_lane_y(lane);
+
+    prv_fill(ctx, GRect(0, y, w, RB_LANE_H), prv_lane_bed(lane));
+
+    // A rail down the middle of the bed: the line the notes travel along, and
+    // what makes an empty lane still read as a lane.
+    prv_fill(ctx, GRect(0, (int16_t)(y + RB_LANE_RAIL_DY), RB_TARGET_ZONE_X, RB_LANE_RAIL_H),
+             prv_lane_rail(lane));
+
+    // The target zone is plain black so a note crossing the target is never read
+    // against a coloured bed, with a bright rule marking the boundary.
+    prv_fill(ctx, GRect(RB_TARGET_ZONE_X, y, (int16_t)(w - RB_TARGET_ZONE_X), RB_LANE_H),
+             GColorBlack);
+    prv_fill(ctx, GRect(RB_TARGET_DIVIDER_X, y, RB_TARGET_DIVIDER_W, RB_LANE_H),
+             GColorLightGray);
+  }
+}
+
+static void prv_draw_targets(GContext *ctx, uint32_t elapsed_ms) {
+  for (uint8_t lane = 0; lane < RB_LANE_COUNT; lane++) {
+    const GPoint centre = GPoint(RB_TARGET_CX, prv_lane_cy(lane));
+    const RbJudgment flash = feedback_lane_flash(lane, elapsed_ms);
+    const GColor accent = prv_lane_accent(lane);
+
+    if (flash == RB_JUDGE_NONE) {
+      // Resting: a hollow ring in the lane's accent with that button's own arrow
+      // inside it, so the mapping is legible without a legend.
+      graphics_context_set_stroke_color(ctx, accent);
+      graphics_context_set_stroke_width(ctx, RB_TARGET_RING_W);
+      graphics_draw_circle(ctx, centre, RB_TARGET_R - RB_TARGET_RING_W / 2);
+      graphics_context_set_stroke_width(ctx, 1);
+
+      graphics_context_set_fill_color(ctx, accent);
+      prv_draw_triangle(ctx, centre.x, centre.y, 8, 12, lane == RB_LANE_TOP);
+      continue;
+    }
+
+    // Struck: the ring fills with the lane colour behind a white rim, and a
+    // perfect adds a white core -- the design's "flat burst", with no gradients
+    // and nothing that has to be animated frame by frame.
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_circle(ctx, centre, RB_TARGET_R);
+    graphics_context_set_fill_color(ctx, accent);
+    graphics_fill_circle(ctx, centre, (int16_t)(RB_TARGET_R - RB_TARGET_RING_W));
+    if (flash == RB_JUDGE_PERFECT) {
+      graphics_context_set_fill_color(ctx, GColorWhite);
+      graphics_fill_circle(ctx, centre, (int16_t)(RB_TARGET_R - RB_TARGET_RING_W - 6));
+    }
+  }
+}
+
+// x = target - (time until the note is due) * speed. A note still in the future
+// has a positive delta and therefore sits left of the target; the note reaches
+// the target exactly when delta hits zero. This single line is the whole
+// relationship between the song clock and the picture.
+static int16_t prv_note_x(int32_t delta_ms) {
+  return (int16_t)(RB_TARGET_CX - (delta_ms * RB_SCROLL_PX_PER_SEC) / 1000);
+}
+
+static void prv_draw_notes(GContext *ctx, int16_t w, uint32_t elapsed_ms) {
+  const Chart *const chart = game_chart();
+  if (chart == NULL) {
+    return;
   }
 
+  const int16_t cull_left = -RB_CULL_MARGIN;
+  const int16_t cull_right = (int16_t)(w + RB_CULL_MARGIN);
+
+  // Scanning forward from the live cursor, hit times ascend, so x descends
+  // monotonically -- the first note off the left edge ends the loop and nothing
+  // ever walks the whole chart.
+  for (uint16_t i = game_first_live(); i < chart->note_count; i++) {
+    const ChartNote *const note = &chart->notes[i];
+    const int32_t delta_ms = (int32_t)note->hit_time_ms - (int32_t)elapsed_ms;
+    const int16_t x = prv_note_x(delta_ms);
+
+    if (x < cull_left) {
+      break;
+    }
+    if (x > cull_right || game_note_judgment(i) != RB_JUDGE_NONE) {
+      continue;  // already resolved: hit notes vanish, missed notes are dropped
+    }
+
+    const bool big = (note->type == RB_NOTE_BIG);
+    const int16_t r = big ? RB_NOTE_R_BIG : RB_NOTE_R_NORMAL;
+    const GPoint centre = GPoint(x, prv_lane_cy(note->lane));
+
+    // White disc first, lane colour inside it: a filled ring drawn as two fills
+    // rather than a stroked circle, so the rim stays exactly RB_NOTE_RING_W at
+    // every radius and big notes do not thin out.
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_circle(ctx, centre, r);
+    graphics_context_set_fill_color(ctx, prv_lane_accent(note->lane));
+    graphics_fill_circle(ctx, centre, (int16_t)(r - RB_NOTE_RING_W));
+
+    // A dot of the lane's own bed colour in the middle. It reads as a hole in
+    // the note, and it is what keeps the two lanes distinguishable at a glance
+    // where the accents sit close together on a squashed palette.
+    graphics_context_set_fill_color(ctx, prv_lane_bed(note->lane));
+    graphics_fill_circle(ctx, centre, RB_NOTE_DOT_R);
+  }
+}
+
+static void prv_draw_popup(GContext *ctx, uint32_t elapsed_ms) {
+  // The popup belongs to the lane that was struck, not to the screen: it sits
+  // inside that lane's band so the eye is told WHERE as well as WHAT. Driven off
+  // that lane's own flash, so the plate and the lit target appear and vanish
+  // together instead of on two separate timers.
+  const uint8_t lane = feedback_last_lane();
+  if (lane >= RB_LANE_COUNT) {
+    return;
+  }
+  const RbJudgment judgment = feedback_lane_flash(lane, elapsed_ms);
+  if (judgment == RB_JUDGE_NONE) {
+    return;
+  }
+
+  const int16_t y = (int16_t)(prv_lane_y(lane) + (RB_LANE_H - RB_POPUP_H) / 2);
+  const GRect box = GRect(RB_POPUP_INSET_X, y, RB_POPUP_W, RB_POPUP_H);
+
+  prv_fill(ctx, box, (judgment == RB_JUDGE_MISS) ? GColorLightGray : GColorYellow);
+  prv_draw_text(ctx, prv_judgment_text(judgment), FONT_KEY_GOTHIC_14_BOLD,
+                GRect(box.origin.x, (int16_t)(box.origin.y + 5), box.size.w, 18),
+                GTextAlignmentCenter, GColorBlack);
+}
+
+static void prv_draw_field(GContext *ctx, GRect bounds) {
+  const uint32_t elapsed_ms = game_elapsed_ms();
+
+  // Antialiasing is paid for per drawn pixel and is by far the most expensive
+  // thing here: this layer draws a dozen or more circles, several of them
+  // stroked, 25 times a second. The static screens keep it; this one cannot
+  // afford it, and at this size the difference is not visible in motion.
+  prv_draw_lane_beds(ctx, bounds.size.w);
+  prv_draw_targets(ctx, elapsed_ms);
+  prv_draw_notes(ctx, bounds.size.w, elapsed_ms);
+  prv_draw_popup(ctx, elapsed_ms);
+}
+
+// ---------------------------------------------------------------------------
+// Song band -- art tile, title/artist, progress
+// ---------------------------------------------------------------------------
+
+static void prv_draw_band(GContext *ctx, GRect bounds) {
+  const int16_t w = bounds.size.w;
+  const Chart *const chart = game_chart();
+  const GColor art = prv_song_art(prv_selected_song());
+
+  // Art tile: a record, drawn rather than shipped. Real per-song artwork would
+  // be a bitmap resource each, and this app's entire resource budget is 4KB.
+  prv_fill(ctx, GRect(0, RB_BAND_Y, RB_BAND_ART_W, RB_BAND_H), art);
+  const GPoint disc = GPoint(RB_BAND_ART_W / 2, RB_BAND_Y + RB_BAND_H / 2);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(ctx, disc, RB_BAND_DISC_R);
+  graphics_context_set_fill_color(ctx, art);
+  graphics_fill_circle(ctx, disc, RB_BAND_HOLE_R);
+
+  // Text sits on a black plate behind a bright rule, never on the artwork.
+  prv_fill(ctx, GRect(RB_BAND_ART_W, RB_BAND_Y, RB_BAND_RULE_W, RB_BAND_H), GColorYellow);
+
+  if (chart != NULL) {
+    const int16_t text_x = (int16_t)(RB_BAND_ART_W + RB_BAND_RULE_W + 5);
+    const int16_t text_w = (int16_t)(w - text_x - 3);
+
+    // Word-wrapped rather than pre-split into two lines: the design breaks
+    // two-word titles across lines, and letting the layout engine do it means a
+    // new song needs no per-song line breaking in the generator.
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, chart->title, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                       GRect(text_x, RB_BAND_Y - 3, text_w, 34), GTextOverflowModeWordWrap,
+                       GTextAlignmentLeft, NULL);
+    prv_draw_text(ctx, chart->artist, FONT_KEY_GOTHIC_14,
+                  GRect(text_x, RB_BAND_Y + 29, text_w, 18),
+                  GTextAlignmentLeft, RB_C_LANE_TOP_ACC);
+  }
+
+  // Progress, full width along the very bottom.
+  const int16_t bar_y = RB_PROGRESS_Y;
+  prv_fill(ctx, GRect(0, bar_y, w, RB_PROGRESS_H), GColorDarkGray);
+  if (chart != NULL && chart->end_ms > 0) {
+    uint32_t done = (game_elapsed_ms() * (uint32_t)w) / chart->end_ms;
+    if (done > (uint32_t)w) {
+      done = (uint32_t)w;
+    }
+    prv_fill(ctx, GRect(0, bar_y, (int16_t)done, RB_PROGRESS_H), GColorWhite);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Menus -- title, pause, results. Full screen, above everything else.
+// ---------------------------------------------------------------------------
+
+static void prv_draw_panel(GContext *ctx, GRect box) {
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, box, 6, GCornersAll);
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_context_set_stroke_width(ctx, 2);
+  graphics_draw_round_rect(ctx, box, 6);
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static void prv_draw_lane_hint(GContext *ctx, int16_t w) {
+  // The two lane colours behind the panel, so the button mapping is being
+  // taught before the first note ever arrives.
+  prv_fill(ctx, GRect(0, RB_LANE_TOP_Y, w, RB_LANE_H), RB_C_LANE_TOP_BED);
+  prv_fill(ctx, GRect(0, RB_LANE_BOT_Y, w, RB_LANE_H), RB_C_LANE_BOT_BED);
+}
+
+static void prv_draw_title(GContext *ctx, GRect bounds) {
+  const int16_t w = bounds.size.w;
+
+  prv_fill(ctx, bounds, GColorBlack);
+  prv_draw_lane_hint(ctx, w);
   prv_draw_panel(ctx, GRect(8, RB_TITLE_PANEL_Y, w - 16, RB_TITLE_PANEL_H));
 
   prv_draw_text(ctx, "ROCKBEAT", FONT_KEY_GOTHIC_24_BOLD,
                 GRect(10, RB_TITLE_PANEL_Y + 4, w - 20, 30),
-                GTextAlignmentCenter, GColorYellow);
+                GTextAlignmentCenter, RB_C_LANE_TOP_ACC);
 
-  // The song list. At most RB_TITLE_ROWS fit in the panel, so the list scrolls
-  // around the selection rather than running off the bottom once a third song is
-  // added -- the generator allows that without any change here.
   const uint8_t count = chart_count();
   const uint8_t selected = prv_selected_song();
   const uint8_t visible = (count < RB_TITLE_ROWS) ? count : RB_TITLE_ROWS;
@@ -338,7 +375,6 @@ static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
 
   for (uint8_t row = 0; row < visible; row++) {
     const uint8_t index = (uint8_t)(first + row);
-    const Chart *const song = chart_get(index);
     const int16_t y = (int16_t)(RB_TITLE_LIST_Y + row * RB_TITLE_ROW_H);
     const bool is_selected = (index == selected);
 
@@ -346,7 +382,7 @@ static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
       graphics_context_set_fill_color(ctx, GColorYellow);
       graphics_fill_rect(ctx, GRect(12, y, w - 24, RB_TITLE_ROW_H - 2), 4, GCornersAll);
     }
-    prv_draw_text(ctx, song->title, FONT_KEY_GOTHIC_14_BOLD,
+    prv_draw_text(ctx, chart_get(index)->title, FONT_KEY_GOTHIC_14_BOLD,
                   GRect(16, (int16_t)(y - 2), w - 32, RB_TITLE_ROW_H),
                   GTextAlignmentCenter, is_selected ? GColorBlack : GColorLightGray);
   }
@@ -358,7 +394,6 @@ static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
   prv_draw_text(ctx, best, FONT_KEY_GOTHIC_18_BOLD,
                 GRect(10, (int16_t)(after_list + 2), w - 20, 22),
                 GTextAlignmentCenter, GColorLightGray);
-
   prv_draw_text(ctx, "SELECT to play", FONT_KEY_GOTHIC_14_BOLD,
                 GRect(10, (int16_t)(after_list + 24), w - 20, 18),
                 GTextAlignmentCenter, GColorWhite);
@@ -367,8 +402,8 @@ static void prv_draw_title(GContext *ctx, const RbLayout *lay) {
                 GTextAlignmentCenter, GColorDarkGray);
 }
 
-static void prv_draw_pause(GContext *ctx, const RbLayout *lay) {
-  const int16_t w = lay->bounds.size.w;
+static void prv_draw_pause(GContext *ctx, GRect bounds) {
+  const int16_t w = bounds.size.w;
 
   prv_draw_panel(ctx, GRect(12, 58, w - 24, 112));
   prv_draw_text(ctx, "PAUSED", FONT_KEY_GOTHIC_28_BOLD, GRect(14, 66, w - 28, 34),
@@ -394,12 +429,13 @@ static const char *prv_rank(uint16_t accuracy_pct, uint16_t misses) {
   return "C";
 }
 
-static void prv_draw_results(GContext *ctx, const RbLayout *lay) {
-  const int16_t w = lay->bounds.size.w;
+static void prv_draw_results(GContext *ctx, GRect bounds) {
+  const int16_t w = bounds.size.w;
   const uint16_t misses = game_count(RB_JUDGE_MISS);
   const uint16_t accuracy = game_accuracy_pct();
 
-  prv_draw_lanes(ctx, lay);
+  prv_fill(ctx, bounds, GColorBlack);
+  prv_draw_lane_hint(ctx, w);
   prv_draw_panel(ctx, GRect(6, 14, w - 12, 200));
 
   prv_draw_text(ctx, prv_rank(accuracy, misses), FONT_KEY_BITHAM_30_BLACK,
@@ -416,66 +452,65 @@ static void prv_draw_results(GContext *ctx, const RbLayout *lay) {
   }
 
   snprintf(buf, sizeof(buf), "%u%% accuracy", (unsigned)accuracy);
-  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_18, GRect(8, 112, w - 16, 24), GTextAlignmentCenter,
-                GColorLightGray);
+  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_18, GRect(8, 112, w - 16, 24),
+                GTextAlignmentCenter, GColorLightGray);
 
   snprintf(buf, sizeof(buf), "PERFECT   %u", (unsigned)game_count(RB_JUDGE_PERFECT));
-  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(20, 138, w - 40, 18), GTextAlignmentLeft,
-                GColorYellow);
+  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(20, 138, w - 40, 18),
+                GTextAlignmentLeft, GColorWhite);
   snprintf(buf, sizeof(buf), "GOOD      %u", (unsigned)game_count(RB_JUDGE_GOOD));
-  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(20, 155, w - 40, 18), GTextAlignmentLeft,
-                GColorBrightGreen);
+  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(20, 155, w - 40, 18),
+                GTextAlignmentLeft, GColorWhite);
   snprintf(buf, sizeof(buf), "MISS      %u", (unsigned)misses);
-  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(20, 172, w - 40, 18), GTextAlignmentLeft,
-                GColorLightGray);
+  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(20, 172, w - 40, 18),
+                GTextAlignmentLeft, GColorWhite);
 
   snprintf(buf, sizeof(buf), "max combo x%u", (unsigned)game_max_combo());
-  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(8, 192, w - 16, 18), GTextAlignmentCenter,
-                GColorDarkGray);
+  prv_draw_text(ctx, buf, FONT_KEY_GOTHIC_14, GRect(8, 192, w - 16, 18),
+                GTextAlignmentCenter, GColorLightGray);
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
+static void prv_draw_menu(GContext *ctx, GRect bounds) {
 
-void render_update_proc(Layer *layer, GContext *ctx) {
-  const RbLayout lay = prv_layout(layer);
-  const RbScreen screen = game_screen();
-
-  // Antialiasing is paid for per drawn pixel, and it is by far the most
-  // expensive thing on this screen: a gameplay frame draws a dozen or more
-  // circles, several of them stroked three pixels wide, and it draws them 25
-  // times a second. On the emulator that is free. On the watch it was the lag.
-  //
-  // So it is spent where it is seen and not where it is felt. The title, pause
-  // and results screens are drawn ONCE and then sit still under the player's
-  // eye, so they keep it. The playfield is in constant motion, where a smooth
-  // frame rate reads as quality far more than a smooth circle edge does.
-  const bool playing = (screen == RB_SCREEN_PLAYING || screen == RB_SCREEN_PAUSED);
-  graphics_context_set_antialiased(ctx, !playing);
-
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, lay.bounds, 0, GCornerNone);
-
-  switch (screen) {
+  switch (game_screen()) {
     case RB_SCREEN_TITLE:
-      prv_draw_title(ctx, &lay);
-      break;
-    case RB_SCREEN_PLAYING:
-      prv_draw_play(ctx, &lay);
+      prv_draw_title(ctx, bounds);
       break;
     case RB_SCREEN_PAUSED:
-      // The field stays visible behind the panel so the player can see exactly
-      // what they are coming back to. The panel itself is static, so it gets
-      // antialiasing back once the playfield underneath it has been drawn.
-      prv_draw_play(ctx, &lay);
-      graphics_context_set_antialiased(ctx, true);
-      prv_draw_pause(ctx, &lay);
+      // Drawn straight over the live playfield underneath -- nothing clears the
+      // background, so the player sees exactly what they are coming back to.
+      prv_draw_pause(ctx, bounds);
       break;
     case RB_SCREEN_RESULTS:
-      prv_draw_results(ctx, &lay);
+      prv_draw_results(ctx, bounds);
       break;
     default:
       break;
   }
+}
+
+// ---------------------------------------------------------------------------
+
+void render_update_proc(Layer *layer, GContext *ctx) {
+  const GRect bounds = layer_get_bounds(layer);
+  const RbScreen screen = game_screen();
+  const bool playing = (screen == RB_SCREEN_PLAYING || screen == RB_SCREEN_PAUSED);
+
+  // Antialiasing is paid for per drawn pixel and is by far the most expensive
+  // thing on this screen: a gameplay frame draws a dozen or more circles, some
+  // of them stroked, 25 times a second. The static screens keep it; the
+  // playfield cannot afford it, and at this size the difference is not visible
+  // in motion.
+  graphics_context_set_antialiased(ctx, !playing);
+
+  prv_fill(ctx, bounds, GColorBlack);
+
+  if (playing) {
+    prv_draw_hud(ctx, bounds);
+    prv_draw_field(ctx, bounds);
+    prv_draw_band(ctx, bounds);
+  }
+  // The pause panel is drawn over the live playfield, so the player sees
+  // exactly what they are coming back to.
+  prv_draw_menu(ctx, bounds);
 }

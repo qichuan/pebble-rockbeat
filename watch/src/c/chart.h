@@ -19,22 +19,25 @@
 // walking 0..RB_LANE_COUNT downward, and everything else is sized from
 // RB_LANE_COUNT rather than from the number 3.
 //
-// Two lanes, not three. The DOWN button is deliberately unused for gameplay:
-// two buttons is easier to play, and the game is a two-handed alternation
-// rather than a three-way choice. Dropping BOTTOM rather than MIDDLE keeps the
-// remaining pair adjacent, so the hand does not have to skip over a dead button.
+// Two lanes, on the two EXTREMES of the button stack rather than two adjacent
+// buttons. UP and DOWN can both be found without looking, which SELECT -- boxed
+// in by its neighbours -- cannot; the design calls this out explicitly and it is
+// worth the dead button in the middle.
+//
+// This supersedes the older arrangement of UP + SELECT. SELECT is now idle
+// during play, which also frees it to mean one unambiguous thing everywhere
+// else: on the title screen it starts the song, and UP/DOWN choose it.
 //
 // Note the knock-on effect documented in tools/make_chart.py: with only two
-// lanes the same-lane spacing rule leaves offbeats nowhere legal to go, so the
-// chart comes out as exactly the beat grid.
+// lanes the same-lane spacing rule leaves offbeats nowhere legal to go.
 typedef enum {
   RB_LANE_TOP = 0,  // UP button
-  RB_LANE_MID,      // SELECT button
+  RB_LANE_BOT,      // DOWN button
   RB_LANE_COUNT,
 } RbLane;
 
-// Reported for a button press that is not a gameplay lane -- DOWN, which the
-// menus use but the playfield has no band for. Deliberately outside the enum:
+// Reported for a button press that is not a gameplay lane -- SELECT, which
+// starts and resumes but never hits a note. Deliberately outside the enum:
 // it must never index a lane-sized array, and every consumer has to decide what
 // to do with it rather than silently treating it as lane 0.
 #define RB_LANE_NONE 0xFF
@@ -59,6 +62,7 @@ typedef struct {
 
 typedef struct {
   const char *title;
+  const char *artist;   // shown under the title in the song band
   const ChartNote *notes;
   uint16_t note_count;
   uint16_t bpm;

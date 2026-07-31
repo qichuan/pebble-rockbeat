@@ -15,6 +15,13 @@ static LaneFlash s_flash[RB_LANE_COUNT];
 static uint8_t s_last_judgment;
 static uint32_t s_last_until_ms;
 
+// Which lane the most recent judged hit landed in. The judgment popup belongs
+// to a lane, and render.c used to work that out by scanning for a lane whose
+// flash matched the judgment -- which silently defaulted to lane 0 whenever the
+// flashes had expired, and drew a bottom-lane PERFECT in the top lane. The lane
+// is known here; there is no reason for anyone to infer it.
+static uint8_t s_last_lane = RB_LANE_NONE;
+
 static bool s_haptics_enabled = true;
 static uint32_t s_next_vibe_ms;  // earliest elapsed time a normal pulse may fire
 static bool s_vibe_armed;        // false until the first hit, so 0 is not "due"
@@ -33,6 +40,7 @@ void feedback_reset(void) {
   }
   s_last_judgment = RB_JUDGE_NONE;
   s_last_until_ms = 0;
+  s_last_lane = RB_LANE_NONE;
   s_next_vibe_ms = 0;
   s_vibe_armed = false;
 }
@@ -119,6 +127,7 @@ void feedback_hit(uint8_t lane, RbJudgment judgment, const ChartNote *note,
   // readable once the note itself has gone.
   s_last_judgment = (uint8_t)judgment;
   s_last_until_ms = elapsed_ms + (RB_FLASH_MS * 2);
+  s_last_lane = lane;
 
   if (judgment != RB_JUDGE_MISS) {
     prv_vibe(note, elapsed_ms);
@@ -130,6 +139,10 @@ RbJudgment feedback_lane_flash(uint8_t lane, uint32_t elapsed_ms) {
     return RB_JUDGE_NONE;
   }
   return (RbJudgment)s_flash[lane].judgment;
+}
+
+uint8_t feedback_last_lane(void) {
+  return s_last_lane;
 }
 
 RbJudgment feedback_last_judgment(uint32_t elapsed_ms) {

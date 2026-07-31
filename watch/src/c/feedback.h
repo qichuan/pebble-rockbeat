@@ -28,6 +28,11 @@ RbJudgment feedback_lane_flash(uint8_t lane, uint32_t elapsed_ms);
 // Most recent judgment, for the HUD readout. RB_JUDGE_NONE once it has aged out.
 RbJudgment feedback_last_judgment(uint32_t elapsed_ms);
 
+// Lane of the most recent judged hit, or RB_LANE_NONE before the first one.
+// The popup is drawn inside the lane that was struck, and that lane has to be
+// reported rather than inferred from which flashes happen to be alight.
+uint8_t feedback_last_lane(void);
+
 void feedback_set_haptics(bool enabled);
 bool feedback_haptics_enabled(void);
 

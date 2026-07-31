@@ -44,50 +44,52 @@ static void prv_timer_stop(void) {
 // Screen transitions
 // ---------------------------------------------------------------------------
 
+// One canvas, one repaint. See render.h for why the obvious per-band split does
+// not work here.
+static void prv_enter_screen(RbScreen screen) {
+  game_set_screen(screen);
+  layer_mark_dirty(s_canvas);
+}
+
 static void prv_enter_title(void) {
-  game_set_screen(RB_SCREEN_TITLE);
   prv_timer_stop();
   audio_song_stop();
   feedback_silence();
-  layer_mark_dirty(s_canvas);
+  prv_enter_screen(RB_SCREEN_TITLE);
 }
 
 static void prv_start_song(void) {
   feedback_reset();
   s_chart = chart_get(s_song);
   game_start(s_chart, clock_now_ms());
-  game_set_screen(RB_SCREEN_PLAYING);
+  prv_enter_screen(RB_SCREEN_PLAYING);
   audio_song_start(s_song, game_elapsed_ms());
   prv_timer_start();
-  layer_mark_dirty(s_canvas);
 }
 
 static void prv_enter_results(void) {
-  game_set_screen(RB_SCREEN_RESULTS);
   prv_timer_stop();
   audio_song_stop();
   feedback_silence();
   // The only persist write in the app, and deliberately not in the frame loop:
   // a flash write mid-song could stall a frame.
   save_record(s_song, game_score(), game_max_combo());
-  layer_mark_dirty(s_canvas);
+  prv_enter_screen(RB_SCREEN_RESULTS);
 }
 
 static void prv_pause(void) {
   game_pause(clock_now_ms());
-  game_set_screen(RB_SCREEN_PAUSED);
   prv_timer_stop();
   audio_song_stop();
   feedback_silence();
-  layer_mark_dirty(s_canvas);
+  prv_enter_screen(RB_SCREEN_PAUSED);
 }
 
 static void prv_resume(void) {
   game_resume(clock_now_ms());
-  game_set_screen(RB_SCREEN_PLAYING);
+  prv_enter_screen(RB_SCREEN_PLAYING);
   audio_song_start(s_song, game_elapsed_ms());
   prv_timer_start();
-  layer_mark_dirty(s_canvas);
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +118,8 @@ static void prv_lane_hit(uint8_t lane, uint32_t press_now_ms) {
 #endif
 
   // Redraw immediately rather than waiting up to a frame: the flash should
-  // appear on the press, not 33ms later.
+  // appear on the press, not a frame later. Only the field and the HUD can have
+  // changed -- the band is untouched by a hit.
   layer_mark_dirty(s_canvas);
 }
 
@@ -135,8 +138,8 @@ static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
 
     case RB_SCREEN_TITLE:
       // UP and DOWN move the selection, matching the buttons' physical order --
-      // UP goes up the list. SELECT plays whatever is selected.
-      if (lane == RB_LANE_MID) {
+      // UP goes up the list. SELECT, which is not a lane, plays what is chosen.
+      if (lane == RB_LANE_NONE) {
         prv_start_song();
       } else {
         const uint8_t count = chart_count();
@@ -161,7 +164,7 @@ static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
       break;
 
     case RB_SCREEN_PAUSED:
-      if (lane == RB_LANE_MID) {
+      if (lane == RB_LANE_NONE) {
         prv_resume();
       } else if (lane == RB_LANE_TOP) {
         prv_start_song();
@@ -298,6 +301,8 @@ static void prv_frame(void *data) {
     return;  // the timer is stopped; do not reschedule
   }
 
+  // The field is the only thing that moves every frame; the HUD and the band
+  // repaint themselves only when their own content changes.
   layer_mark_dirty(s_canvas);
 
   // Audio is released against SONG time, never against an AppTimer. The two are

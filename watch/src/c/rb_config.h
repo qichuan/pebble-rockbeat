@@ -24,53 +24,84 @@
 #define RB_FRAME_MS 40
 
 // ---------------------------------------------------------------------------
-// Vertical layout
+// Vertical layout -- taken directly from the design, composed at 200x228.
 //
-// 228 = 24 + (60 * 3) + 24. That split is not arbitrary: it puts the middle
-// lane's centre on y=114, the exact vertical centre of the screen, which is
-// where the SELECT button sits. TOP and BOTTOM then land at 54 and 174 --
-// symmetric about centre, lining up with UP and DOWN. Keeping the lane order
-// glued to the physical button order is the whole ergonomic premise of the
-// game, so these two bands are the first thing to preserve if the layout is
-// ever revisited.
+//    0..56    HUD          score left, combo right
+//   56..106   lane TOP     UP button
+//  106..112   gutter
+//  112..162   lane BOT     DOWN button
+//  162..168   gutter
+//  168..220   song band    art tile + title/artist
+//  220..228   progress
+//
+// These are absolute because the design is: it was drawn at this exact size for
+// this exact screen, and deriving them from bounds would only invent a layout
+// nobody drew. The one thing still read from bounds at draw time is the WIDTH,
+// so the right-hand furniture stays anchored if the canvas ever differs.
 // ---------------------------------------------------------------------------
 
-#define RB_HUD_TOP_H 24  // score + progress bar; fits FONT_KEY_GOTHIC_18
-#define RB_HUD_BOT_H 24  // combo + last judgment
+#define RB_HUD_H 56          // score + combo band across the top
+#define RB_LANE_TOP_Y 56
+#define RB_LANE_BOT_Y 112
+#define RB_LANE_H 50
+#define RB_LANE_RAIL_DY 24   // the rail sits this far down inside a lane
+#define RB_LANE_RAIL_H 2
+
+// The lane bed stops here and the target zone behind it is plain black, so a
+// note crossing the target is never read against a coloured bed.
+#define RB_TARGET_ZONE_X 148
+#define RB_TARGET_DIVIDER_X 146
+#define RB_TARGET_DIVIDER_W 2
+
+#define RB_BAND_Y 168        // song band: art tile + title/artist plate
+#define RB_BAND_H 52
+#define RB_BAND_ART_W 74
+#define RB_BAND_RULE_W 2     // yellow rule separating art from text
+#define RB_BAND_DISC_R 15    // the record on the art tile
+#define RB_BAND_HOLE_R 4
+
+#define RB_PROGRESS_Y 220
+#define RB_PROGRESS_H 8
 
 // ---------------------------------------------------------------------------
 // Horizontal layout
 // ---------------------------------------------------------------------------
 
-// Hit target sits this far in from the right edge, i.e. x=168 on emery. The
-// ring (r=18) then spans x 150..186, leaving 14px for the per-lane button hint
-// glyph in the right margin -- "beside the buttons", which is where the eye
-// already is.
-#define RB_TARGET_INSET_R 32
-#define RB_TARGET_R 18
-#define RB_TARGET_RING_W 3
+// Target centre. The design puts a 40x40 ring at x=156, so its centre is 176.
+#define RB_TARGET_CX 176
+#define RB_TARGET_R 20
+#define RB_TARGET_RING_W 5
 
-#define RB_NOTE_R_NORMAL 11
-#define RB_NOTE_R_BIG 16
+// Notes are 28px across in the design, so r=14, with a 3px white ring and an
+// inner dot in the lane's own bed colour.
+#define RB_NOTE_R_NORMAL 14
+#define RB_NOTE_R_BIG 18
+#define RB_NOTE_RING_W 3
+#define RB_NOTE_DOT_R 4
 
 // Notes are culled outside this margin either side of the screen. Slightly
 // larger than RB_NOTE_R_BIG so a big note slides off smoothly rather than
 // popping.
 #define RB_CULL_MARGIN 24
 
-// Travel from x=-16 to the target at x=168 is 184px; at 120px/s that is a ~1.53s
+// Travel from x=-18 to the target at x=176 is 194px; at 120px/s that is a ~1.6s
 // read-ahead.
 //
-// Speed is now a LEGIBILITY constraint, not a taste one. The chart carries every
+// Speed is a LEGIBILITY constraint, not a taste one. The chart carries every
 // melody note, so notes come as close as 127ms apart, and two notes 127ms apart
 // at 95px/s were 12px apart -- closer than one note's diameter, so a run of
 // sixteenths merged into a smear. At 120px/s the same pair is 15px apart and the
 // tightest SAME-lane pair (an eighth, 254ms) is 30px, which clears a normal
-// note's 22px diameter.
-//
-// Raising it further would fix nothing and cost read-ahead, which at this
-// density is the scarcer resource: 1.53s is about four notes of runway.
+// note's 28px diameter.
 #define RB_SCROLL_PX_PER_SEC 120
+
+// ---------------------------------------------------------------------------
+// Judgment popup -- the yellow plate the design puts inside the hit lane.
+// ---------------------------------------------------------------------------
+
+#define RB_POPUP_W 68
+#define RB_POPUP_H 30
+#define RB_POPUP_INSET_X 6   // from the lane's left edge
 
 // ---------------------------------------------------------------------------
 // Judgment windows (milliseconds either side of the note's hit_time_ms)

@@ -7,10 +7,10 @@ of the watch. Notes ("pebbles") scroll left to right toward a fixed
 hit target beside the buttons; press that lane's button as a note arrives.
 
 ```
-  TOP lane    ->  UP button       (blue)
-  MIDDLE lane ->  SELECT button   (red)     <- screen centre, where SELECT is
-  DOWN        ->  song select on the title screen; not a lane
-  BACK        ->  exit            (never used for gameplay)
+  TOP lane    ->  UP button       (orange)
+  BOTTOM lane ->  DOWN button     (blue)
+  SELECT      ->  start / resume; never a lane
+  BACK        ->  pause / exit    (never used for gameplay)
 ```
 
 Two lanes rather than three: it is easier to play, and it turns the game into a
@@ -202,7 +202,7 @@ SELECT is, and the bottom third is simply left dark.
 | Screen | UP | SELECT | DOWN | BACK |
 |---|---|---|---|---|
 | Title | previous song | play selected song | next song | exit the app |
-| Playing | TOP lane | MIDDLE lane | (ignored) | pause |
+| Playing | TOP lane | (ignored) | BOTTOM lane | pause |
 | Paused | restart | resume | quit to title | quit to title |
 | Results | to title | to title | to title | to title |
 

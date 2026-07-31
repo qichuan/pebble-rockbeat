@@ -51,7 +51,7 @@ static RbJudgment prv_hit(uint8_t lane, uint32_t at_ms) {
 // ---------------------------------------------------------------------------
 
 static void test_windows(void) {
-  static const ChartNote notes[] = { { 10000, RB_LANE_MID, RB_NOTE_NORMAL } };
+  static const ChartNote notes[] = { { 10000, RB_LANE_BOT, RB_NOTE_NORMAL } };
   const Chart chart = prv_make_chart(notes, 1);
 
   const struct {
@@ -74,7 +74,7 @@ static void test_windows(void) {
 
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     game_start(&chart, 0);
-    const RbJudgment got = prv_hit(RB_LANE_MID, (uint32_t)(10000 + cases[i].offset));
+    const RbJudgment got = prv_hit(RB_LANE_BOT, (uint32_t)(10000 + cases[i].offset));
     CHECK(got == cases[i].expect, "offset %+d: expected %d, got %d", (int)cases[i].offset,
           (int)cases[i].expect, (int)got);
 
@@ -93,8 +93,8 @@ static void test_windows(void) {
 
 static void test_nearest_note_wins(void) {
   static const ChartNote notes[] = {
-    { 10000, RB_LANE_MID, RB_NOTE_NORMAL },
-    { 10200, RB_LANE_MID, RB_NOTE_NORMAL },
+    { 10000, RB_LANE_BOT, RB_NOTE_NORMAL },
+    { 10200, RB_LANE_BOT, RB_NOTE_NORMAL },
   };
   const Chart chart = prv_make_chart(notes, 2);
 
@@ -103,7 +103,7 @@ static void test_nearest_note_wins(void) {
   // from the config rather than hardcoded -- a literal here silently changes
   // meaning the moment the windows are retuned, which is exactly what happened.
   const uint32_t offset = RB_PERFECT_MS + 10;
-  CHECK(prv_hit(RB_LANE_MID, 10000 + offset) == RB_JUDGE_GOOD,
+  CHECK(prv_hit(RB_LANE_BOT, 10000 + offset) == RB_JUDGE_GOOD,
         "expected GOOD on the nearer note");
   CHECK(game_note_judgment(0) != RB_JUDGE_NONE, "first note should have been consumed");
   CHECK(game_note_judgment(1) == RB_JUDGE_NONE, "second note should be untouched");
@@ -111,19 +111,19 @@ static void test_nearest_note_wins(void) {
 
 static void test_tie_breaks_to_earlier(void) {
   static const ChartNote notes[] = {
-    { 10000, RB_LANE_MID, RB_NOTE_NORMAL },
-    { 10200, RB_LANE_MID, RB_NOTE_NORMAL },
+    { 10000, RB_LANE_BOT, RB_NOTE_NORMAL },
+    { 10200, RB_LANE_BOT, RB_NOTE_NORMAL },
   };
   const Chart chart = prv_make_chart(notes, 2);
 
   game_start(&chart, 0);
-  prv_hit(RB_LANE_MID, 10100);  // exactly equidistant
+  prv_hit(RB_LANE_BOT, 10100);  // exactly equidistant
   CHECK(game_note_judgment(0) != RB_JUDGE_NONE, "tie should resolve to the EARLIER note");
   CHECK(game_note_judgment(1) == RB_JUDGE_NONE, "later note should be untouched on a tie");
 }
 
 static void test_wrong_lane_is_a_stray(void) {
-  static const ChartNote notes[] = { { 10000, RB_LANE_MID, RB_NOTE_NORMAL } };
+  static const ChartNote notes[] = { { 10000, RB_LANE_BOT, RB_NOTE_NORMAL } };
   const Chart chart = prv_make_chart(notes, 1);
 
   game_start(&chart, 0);
@@ -134,13 +134,13 @@ static void test_wrong_lane_is_a_stray(void) {
 
 static void test_stray_preserves_combo(void) {
   static const ChartNote notes[] = {
-    {  1000, RB_LANE_MID, RB_NOTE_NORMAL },
-    { 20000, RB_LANE_MID, RB_NOTE_NORMAL },
+    {  1000, RB_LANE_BOT, RB_NOTE_NORMAL },
+    { 20000, RB_LANE_BOT, RB_NOTE_NORMAL },
   };
   const Chart chart = prv_make_chart(notes, 2);
 
   game_start(&chart, 0);
-  prv_hit(RB_LANE_MID, 1000);
+  prv_hit(RB_LANE_BOT, 1000);
   CHECK(game_combo() == 1, "combo should be 1 after one hit");
 
   // Nowhere near any note.
@@ -153,7 +153,7 @@ static void test_stray_preserves_combo(void) {
 // ---------------------------------------------------------------------------
 
 static void test_auto_miss(void) {
-  static const ChartNote notes[] = { { 10000, RB_LANE_MID, RB_NOTE_NORMAL } };
+  static const ChartNote notes[] = { { 10000, RB_LANE_BOT, RB_NOTE_NORMAL } };
   const Chart chart = prv_make_chart(notes, 1);
 
   game_start(&chart, 0);
@@ -170,13 +170,13 @@ static void test_auto_miss(void) {
 
 static void test_auto_miss_resets_combo(void) {
   static const ChartNote notes[] = {
-    {  1000, RB_LANE_MID, RB_NOTE_NORMAL },
-    { 10000, RB_LANE_MID, RB_NOTE_NORMAL },
+    {  1000, RB_LANE_BOT, RB_NOTE_NORMAL },
+    { 10000, RB_LANE_BOT, RB_NOTE_NORMAL },
   };
   const Chart chart = prv_make_chart(notes, 2);
 
   game_start(&chart, 0);
-  prv_hit(RB_LANE_MID, 1000);
+  prv_hit(RB_LANE_BOT, 1000);
   CHECK(game_combo() == 1, "combo should be 1");
 
   game_step(10000 + RB_MISS_MS + 1);
@@ -185,11 +185,11 @@ static void test_auto_miss_resets_combo(void) {
 }
 
 static void test_hit_note_is_not_auto_missed(void) {
-  static const ChartNote notes[] = { { 10000, RB_LANE_MID, RB_NOTE_NORMAL } };
+  static const ChartNote notes[] = { { 10000, RB_LANE_BOT, RB_NOTE_NORMAL } };
   const Chart chart = prv_make_chart(notes, 1);
 
   game_start(&chart, 0);
-  CHECK(prv_hit(RB_LANE_MID, 10000) == RB_JUDGE_PERFECT, "expected PERFECT");
+  CHECK(prv_hit(RB_LANE_BOT, 10000) == RB_JUDGE_PERFECT, "expected PERFECT");
   CHECK(game_step(30000) == 0, "a note already judged must never auto-miss");
   CHECK(game_count(RB_JUDGE_MISS) == 0, "miss tally should stay 0");
 }
@@ -199,23 +199,23 @@ static void test_hit_note_is_not_auto_missed(void) {
 // ---------------------------------------------------------------------------
 
 static void test_score_values(void) {
-  static const ChartNote normal[] = { { 10000, RB_LANE_MID, RB_NOTE_NORMAL } };
-  static const ChartNote big[] = { { 10000, RB_LANE_MID, RB_NOTE_BIG } };
+  static const ChartNote normal[] = { { 10000, RB_LANE_BOT, RB_NOTE_NORMAL } };
+  static const ChartNote big[] = { { 10000, RB_LANE_BOT, RB_NOTE_BIG } };
 
   Chart chart = prv_make_chart(normal, 1);
   game_start(&chart, 0);
-  prv_hit(RB_LANE_MID, 10000);
+  prv_hit(RB_LANE_BOT, 10000);
   CHECK(game_score() == RB_SCORE_PERFECT, "perfect normal should score %d, got %lu",
         RB_SCORE_PERFECT, (unsigned long)game_score());
 
   game_start(&chart, 0);
-  prv_hit(RB_LANE_MID, 10000 + RB_GOOD_MS);
+  prv_hit(RB_LANE_BOT, 10000 + RB_GOOD_MS);
   CHECK(game_score() == RB_SCORE_GOOD, "good normal should score %d, got %lu", RB_SCORE_GOOD,
         (unsigned long)game_score());
 
   chart = prv_make_chart(big, 1);
   game_start(&chart, 0);
-  prv_hit(RB_LANE_MID, 10000);
+  prv_hit(RB_LANE_BOT, 10000);
   CHECK(game_score() == RB_SCORE_PERFECT * RB_BIG_MULTIPLIER, "perfect big should score %d, got %lu",
         RB_SCORE_PERFECT * RB_BIG_MULTIPLIER, (unsigned long)game_score());
 }
@@ -226,7 +226,7 @@ static void test_combo_bonus_and_cap(void) {
   const uint16_t count = RB_COMBO_BONUS_CAP + 10;
   for (uint16_t i = 0; i < count; i++) {
     notes[i].hit_time_ms = 1000 + (uint32_t)i * 1000;
-    notes[i].lane = RB_LANE_MID;
+    notes[i].lane = RB_LANE_BOT;
     notes[i].type = RB_NOTE_NORMAL;
   }
   const Chart chart = prv_make_chart(notes, count);
@@ -239,7 +239,7 @@ static void test_combo_bonus_and_cap(void) {
     const uint16_t capped = (prior < RB_COMBO_BONUS_CAP) ? prior : RB_COMBO_BONUS_CAP;
     expected += RB_SCORE_PERFECT + (uint32_t)capped * RB_COMBO_BONUS_PER;
 
-    prv_hit(RB_LANE_MID, notes[i].hit_time_ms);
+    prv_hit(RB_LANE_BOT, notes[i].hit_time_ms);
     CHECK(game_score() == expected, "note %u: expected %lu, got %lu", (unsigned)i,
           (unsigned long)expected, (unsigned long)game_score());
   }
@@ -251,7 +251,7 @@ static void test_combo_bonus_and_cap(void) {
 // ---------------------------------------------------------------------------
 
 static void test_pause_resume_preserves_song_time(void) {
-  static const ChartNote notes[] = { { 10000, RB_LANE_MID, RB_NOTE_NORMAL } };
+  static const ChartNote notes[] = { { 10000, RB_LANE_BOT, RB_NOTE_NORMAL } };
   const Chart chart = prv_make_chart(notes, 1);
 
   game_start(&chart, 0);
@@ -267,7 +267,7 @@ static void test_pause_resume_preserves_song_time(void) {
         (unsigned long)game_elapsed_ms());
 
   // The note is due at song time 10000, which is now clock time 13000.
-  CHECK(prv_hit(RB_LANE_MID, 13000) == RB_JUDGE_PERFECT,
+  CHECK(prv_hit(RB_LANE_BOT, 13000) == RB_JUDGE_PERFECT,
         "a press at the same song offset must still be PERFECT after a pause");
 }
 
@@ -275,7 +275,7 @@ static void test_pause_resume_preserves_song_time(void) {
 // is stopped while paused, so the *measured* length of a long pause is garbage.
 // Resume must not depend on it.
 static void test_long_pause_does_not_skip_the_song(void) {
-  static const ChartNote notes[] = { { 10000, RB_LANE_MID, RB_NOTE_NORMAL } };
+  static const ChartNote notes[] = { { 10000, RB_LANE_BOT, RB_NOTE_NORMAL } };
   const Chart chart = prv_make_chart(notes, 1);
 
   game_start(&chart, 0);
@@ -291,7 +291,7 @@ static void test_long_pause_does_not_skip_the_song(void) {
   CHECK(game_count(RB_JUDGE_MISS) == 0, "a long pause must not auto-miss anything");
 
   game_step(3605000);
-  CHECK(prv_hit(RB_LANE_MID, 3605000) == RB_JUDGE_PERFECT,
+  CHECK(prv_hit(RB_LANE_BOT, 3605000) == RB_JUDGE_PERFECT,
         "the note must still be hittable after a long pause");
 }
 

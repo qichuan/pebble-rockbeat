@@ -19,8 +19,8 @@ static void prv_lane_down(ClickRecognizerRef recognizer, void *context) {
   uint8_t lane = RB_LANE_NONE;
   if (button == BUTTON_ID_UP) {
     lane = RB_LANE_TOP;
-  } else if (button == BUTTON_ID_SELECT) {
-    lane = RB_LANE_MID;
+  } else if (button == BUTTON_ID_DOWN) {
+    lane = RB_LANE_BOT;
   }
 
   if (s_handlers.on_lane_hit != NULL) {
@@ -43,19 +43,21 @@ void input_init(const RbInputHandlers *handlers) {
 void input_click_config_provider(void *context) {
   (void)context;
 
-  // Raw DOWN handlers on the two lane buttons. A rhythm game has to time the
-  // press, not the release: window_single_click_subscribe fires on release, so
-  // however long the player held the button would be added to their timing.
-  // The up_handler is NULL -- hold length carries no meaning here.
+  // Raw press handlers on all three. A rhythm game has to time the press, not
+  // the release: window_single_click_subscribe fires on release, so however long
+  // the player held the button would be added to their timing. The up_handler is
+  // NULL -- hold length carries no meaning here.
+  //
+  // The LANES are UP and DOWN, the two ends of the button stack: both can be
+  // found without looking, which SELECT -- boxed in by its neighbours -- cannot.
   window_raw_click_subscribe(BUTTON_ID_UP, prv_lane_down, NULL, NULL);
-  window_raw_click_subscribe(BUTTON_ID_SELECT, prv_lane_down, NULL, NULL);
-
-  // DOWN is subscribed, but it is NOT a gameplay lane -- two lanes means there
-  // is no third band for it to point at, and aliasing it onto one would break
-  // the "lane position matches button position" rule the whole layout rests on.
-  // It reports RB_LANE_NONE, which the menu screens use to move the song
-  // selection and which the playing screen ignores outright.
   window_raw_click_subscribe(BUTTON_ID_DOWN, prv_lane_down, NULL, NULL);
+
+  // SELECT is subscribed but is NOT a gameplay lane: there is no band between
+  // the two lanes for it to point at, and aliasing it onto one would break the
+  // rule that a lane sits where its button does. It reports RB_LANE_NONE, which
+  // the menus act on -- start, resume -- and the playfield ignores outright.
+  window_raw_click_subscribe(BUTTON_ID_SELECT, prv_lane_down, NULL, NULL);
 
   // BACK must use single-click: pebble.h states the back button cannot take a
   // repeating, long or raw handler. That suits us -- BACK is never a gameplay

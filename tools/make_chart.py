@@ -71,6 +71,7 @@ class Song:
     the one that can be auditioned, so it is the one that is kept.
     """
     title: str          # shown on the title screen; keep it short enough to fit
+    artist: str         # shown under the title in the gameplay song band
     ident: str          # C identifier stem
     midi: Path
     start_bar: int
@@ -89,7 +90,7 @@ SONGS = (
     # 118 BPM. Bar 12 skips the count-in and begins on a downbeat; 28 bars is
     # ~57s. The melody is on an exact sixteenth grid, which is what lets every
     # note be charted -- see build_chart().
-    Song("Never Gonna Give You Up", "ngg", DATA / "melody.mid", 12, 28),
+    Song("Never Gonna Give You Up", "RICK ASTLEY", "ngg", DATA / "melody.mid", 12, 28),
 
     # 59 BPM, so a bar is 4.1s and 14 bars is ~57s.
     #
@@ -98,7 +99,7 @@ SONGS = (
     # for 60% of its length against 53%, with a worst silence of 3.0s against
     # 3.8s. Well clear of the fade-out after bar 64, where the arrangement writes
     # velocity 1 and the game would show notes with nothing behind them.
-    Song("You Are Not Alone", "yana", DATA / "you-are-not-alone.mid", 30, 14),
+    Song("You Are Not Alone", "M. JACKSON", "yana", DATA / "you-are-not-alone.mid", 30, 14),
 
     # 93 BPM. Starts at bar 11, which is 0:25 in the source.
     #
@@ -112,7 +113,7 @@ SONGS = (
     # whose every 28-bar window failed to chart until near-simultaneous onsets
     # were collapsed, and which then cleared the same-lane floor by 1ms. This one
     # clears it by 241ms and places every note on its pitch lane.
-    Song("Golden", "golden", DATA / "golden.mid", 11, 28),
+    Song("Golden", "HUNTR/X", "golden", DATA / "golden.mid", 11, 28),
 )
 
 
@@ -175,11 +176,11 @@ BIG_HELD_MS = 700
 # "I Want It That Way".
 PLAYABLE_MIN_MS = 100
 
-# Lane 0 is the LOWER of the two lanes on screen.  Only the top two lanes are
-# used now, so lane 0 = MIDDLE (SELECT) and lane 1 = TOP (UP); the DOWN button
-# is not a gameplay button any more.  Order matters -- it must stay
-# bottom-most-first so the vertical position keeps matching the physical button.
-LANE_NAMES = ("RB_LANE_MID", "RB_LANE_TOP")
+# Lane 0 is the LOWER of the two lanes on screen, lane 1 the upper. The lanes
+# sit on UP and DOWN -- the two ends of the button stack. Order matters: it must
+# stay bottom-most-first, because build_chart() assigns lane 1 to notes above the
+# melody's median and the higher pitch has to land in the higher lane.
+LANE_NAMES = ("RB_LANE_BOT", "RB_LANE_TOP")
 
 # ---------------------------------------------------------------------------
 # Music -- speaker_play_tracks() parameters.
@@ -893,7 +894,8 @@ def write_chart(built) -> None:
                      f"static const ChartNote s_{song.ident}_notes[] = {{\n{rows}\n}};\n")
 
     rows = "\n".join(
-        f'  {{ .title = "{song.title}", .notes = s_{song.ident}_notes,\n'
+        f'  {{ .title = "{song.title}", .artist = "{song.artist}",\n'
+        f"    .notes = s_{song.ident}_notes,\n"
         f"    .note_count = (uint16_t)(sizeof(s_{song.ident}_notes) "
         f"/ sizeof(s_{song.ident}_notes[0])),\n"
         f"    .bpm = {bpm}, .lead_in_ms = {LEAD_MS}, "

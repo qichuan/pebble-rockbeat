@@ -270,12 +270,40 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   spectral-flux onset detector. The MIDI grid is exact where onset detection only
   approximated it, which is what fixed "the notes don't follow any rhythm".)
 
-- **Two lanes, and the layout must NOT be divided by `RB_LANE_COUNT`.** The
-  premise is that a lane sits at the vertical position of the button that plays
-  it, and the buttons do not move when a lane is dropped. Splitting the playfield
-  in two gives 90px bands centred at y=69/159, putting the SELECT lane 45px below
-  the SELECT button. `render.c` therefore divides by `RB_LANE_SLOTS` (3) and
-  leaves the bottom band empty. Do not "tidy" that back to `RB_LANE_COUNT`.
+- **The lanes are UP and DOWN, and the layout is ABSOLUTE, from the design.**
+  `rb_config.h` carries the exact y bands the design was drawn at (HUD 0-56,
+  lanes 56-106 and 112-162, song band 168-220, progress 220-228). They are not
+  derived from `layer_get_bounds()` any more: the design was composed at 200x228
+  for this screen, and deriving them would only invent a layout nobody drew. The
+  width still comes from bounds so right-hand furniture stays anchored.
+  - SELECT is deliberately NOT a lane. UP and DOWN are the two ends of the button
+    stack and can both be found without looking, which SELECT -- boxed in by its
+    neighbours -- cannot. This replaced the older UP+SELECT pairing.
+  - `RB_LANE_MID` was renamed `RB_LANE_BOT`. `LANE_NAMES` in make_chart.py must
+    stay bottom-most-first: `build_chart()` puts notes above the melody's median
+    in lane 1, and the higher pitch has to land in the higher lane.
+
+- **`layer_mark_dirty()` re-renders the WHOLE WINDOW, not one layer's rect.**
+  Splitting the screen into HUD / playfield / song-band layers and marking only
+  the moving one dirty is the obvious way to stop re-running static text layouts
+  25 times a second. It does not work here, and it was measured rather than
+  assumed: a per-proc counter showed all three layers repainting 927/927/927
+  times over one run, when the band should have repainted about 130. The split
+  bought nothing and cost three extra full-rect background fills per frame, so
+  it was reverted to one canvas. Do not reintroduce it without first proving
+  partial redraw exists.
+
+- **Build colours from their ARGB byte, not by name.** The 64-colour palette is
+  two bits per channel, so a design hex on the grid transcribes mechanically:
+  `0b11` then RR GG BB, each pair meaning 0/85/170/255. Grepping
+  `gcolor_definitions.h` for these values returned confident WRONG answers (it
+  named #555500 "Indigo"), and a wrong colour constant is not something the
+  build catches. `render.c` uses `RB_ARGB(0b11010100)`.
+
+- **The emulator screenshot does not report colours faithfully.** Black comes
+  back exactly #000000 and greys within 1, but saturated colours are warm-shifted
+  (#555500 reads #564E36, #0055AA reads #16638D). Judge hue relationships, not
+  absolute values, and expect the watch to differ again.
 
 - **Two songs, and adding a third is a generator-only change.** `SONGS` in
   `tools/make_chart.py` is the whole configuration: title, C identifier stem,
