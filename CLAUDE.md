@@ -261,6 +261,35 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 - **`sleep N` in a capture script does not reliably reach a given point in the
   song**; use `RB_DEBUG_FREEZE_AT_MS` instead.
 
+- **Capturing ANIMATION needs `RB_DEBUG_TIME_SCALE`, not the freeze flag.** The
+  freeze holds one moment and is a compile-time constant, so a smooth sequence
+  would cost one rebuild-install-wait cycle *per frame*. Slowing the song 20x
+  instead makes an ordinary `pebble screenshot` loop sample even intervals off a
+  single install: a ~920ms round trip becomes ~46ms of song time, and 50 frames
+  take 46 seconds. `tools/make_gif.py` encodes them. Note it scales the clock
+  READING only — press timestamps are not scaled (so use AUTOPLAY) and the
+  speaker cannot be slowed (so the music runs away).
+
+- **`run_tests.sh` fails if any `RB_DEBUG_*` flag is left on**, and that guard
+  exists because leaving one on is INVISIBLE — the build compiles, installs and
+  looks exactly like a good one. It had already happened: the emulator ran the
+  slow-motion capture build unnoticed until two screenshots 12s apart showed the
+  combo advancing by one note where real time is ~47. Note `RB_DEBUG_TIME_SCALE`
+  is a divisor, so its off value is **1**, not 0.
+  - **Rebuilding is not reinstalling.** `pebble build` leaves whatever is on the
+    emulator alone, so a capture session ends with a clean `.pbw` on disk and a
+    debug build still running. Always `pebble install` after resetting the flags.
+
+- **In GIF LZW the decoder's table is one entry behind the encoder's**, because
+  it cannot add the entry for a pair until it sees the following code. The code
+  width must therefore grow one entry LATER than "the table just filled"
+  (`> (1 << code_size)`, not `==`). Wrong by one and every viewer renders
+  garbage a few hundred pixels in with no error raised — it was found by
+  round-tripping, not by eye. `make_gif.py` is checked against both a
+  spec-written decoder and macOS `sips`. The palette needs no quantisation and
+  that is structural: emery has 64 colours, GIF allows 256, so screenshots
+  encode exactly; the tool refuses frames from elsewhere rather than dithering.
+
 - **The chart AND the music are generated from one MIDI file.** Do not hand-edit
   `chart.c` or `music.c` — both are generated. Re-run `python3
   tools/make_chart.py`, which reads `watch/resources/data/melody.mid` and writes

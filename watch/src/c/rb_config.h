@@ -435,6 +435,26 @@
 // capture lands. 0 disables.
 #define RB_DEBUG_FREEZE_AT_MS 0
 
+// Run the song this many times slower than real time. 1 disables (and compiles
+// out entirely).
+//
+// This exists to capture ANIMATION. FREEZE_AT_MS holds one moment, and it is a
+// compile-time constant, so a smooth sequence of frames would cost one
+// rebuild-install-wait cycle per frame -- minutes for a couple of seconds of
+// motion. Slowing the song instead means ONE install, after which a plain loop
+// of `pebble screenshot` samples it at even intervals: at scale S, a ~1s
+// round trip advances the song ~1000/S ms, so S=20 gives ~50ms steps, which at
+// RB_SCROLL_PX_PER_SEC is about 6px of note travel per frame.
+//
+// It scales the clock READING inside the frame handler only. Two consequences,
+// both fine for capture and both wrong for play:
+//   - press timestamps are sampled in the click handler and are NOT scaled, so
+//     manual input judges against a timeline it does not share. Use AUTOPLAY.
+//   - the speaker plays in real time and cannot be slowed, so the music runs
+//     away from the notes and the re-sync guard fights it the whole way.
+// Capture with the sound off, and never leave this on.
+#define RB_DEBUG_TIME_SCALE 1
+
 // Log every judged press. This is how real button input gets verified: once
 // `pebble emu-button` has been used, screenshots on that emulator may be dead,
 // but `pebble logs` keeps working.

@@ -6,6 +6,8 @@ A Taiko-style rhythm game for the Pebble Time 2.
 |:---:|:---:|:---:|
 | ![Title screen: the song list with "Never Gonna Give You Up" selected](developer-portal/screenshots/emery/title.png) | ![Gameplay: notes travelling along two coloured lanes toward the target rings](developer-portal/screenshots/emery/game.png) | ![Results screen: rank S, 67450 points, 100% accuracy](developer-portal/screenshots/emery/result.png) |
 
+![Gameplay loop: notes arriving on both lanes, targets flashing, combo climbing](developer-portal/screenshots/emery/game.gif)
+
 Captured on the emery emulator at 200x228, the watch's real size. Note that
 **it does not report colours faithfully** — #555500 comes back as #564E36 — so
 these read warmer and flatter than the watch does. See "Verifying a change".
@@ -191,6 +193,7 @@ pebble-rockbeat/
   tools/pngkit.py         a supersampling RGBA canvas + PNG writer, stdlib only
   tools/make_icon.py      menu icon (25px, ships) + store icons (80/144, do not)
   tools/make_banner.py    the 720x320 appstore banner
+  tools/make_gif.py       PNG frames -> animated GIF (own PNG reader + LZW)
   developer-portal/       artwork for the store listing; none of it is bundled
 ```
 
@@ -222,11 +225,44 @@ emulator's screenshot does not report the design's colours faithfully anyway
 (#555500 comes back as #564E36).
 
 `screenshots/emery/` holds the listing shots, which are the same files this
-README embeds at the top. **`game.gif` is stale** — it predates the move of the
-lower lane from DOWN to SELECT, so it still shows a down-pointing badge. Regenerating
-it means capturing a frame per `RB_DEBUG_FREEZE_AT_MS` value, which is one
-rebuild-install-wait cycle each; the stills cost one cycle and are current.
-`description.txt` is the listing copy.
+README embeds at the top. `description.txt` is the listing copy.
+
+### The gameplay GIF
+
+```bash
+# rb_config.h: AUTOSTART 1, AUTOPLAY 1, TIME_SCALE 20
+cd watch && pebble build && pebble install --emulator emery
+sleep 240                                  # let the song reach the interesting part
+for i in $(seq -f "%03g" 0 49); do
+  pebble screenshot --emulator emery --no-open /tmp/frames/frame_$i.png
+done
+python3 tools/make_gif.py /tmp/frames developer-portal/screenshots/emery/game.gif --delay-ms 50
+```
+
+The trick is `RB_DEBUG_TIME_SCALE`, which runs the song N times slower. Without
+it, animation is unaffordable: `RB_DEBUG_FREEZE_AT_MS` holds exactly one moment
+and is a *compile-time* constant, so a smooth sequence costs one
+rebuild-install-wait cycle **per frame**. Slowed 20x, a `pebble screenshot` round
+trip (~920 ms measured) advances the song ~46 ms, so an ordinary shell loop
+samples it at even intervals off a single install — 50 frames in 46 seconds.
+Play it back at 50 ms/frame and it runs at very nearly real speed.
+
+`make_gif.py` writes the GIF from scratch: a PNG reader and a GIF LZW encoder,
+stdlib only, like every other tool here. Two things worth knowing:
+
+- **The palette is exact, and that is structural.** emery has 64 colours, so a
+  screenshot of it cannot exceed GIF's 256 — no quantisation, no dithering, and
+  the frames are reproduced pixel-for-pixel. The encoder *asserts* this rather
+  than assuming it, and refuses frames from anywhere else instead of silently
+  degrading them.
+- **The decoder's LZW table runs one entry behind the encoder's**, because it
+  cannot add the entry for a pair until it has seen the code that follows. So
+  the code width must grow one entry later than "the table just filled". Getting
+  that wrong produces a file that every viewer renders as garbage a few hundred
+  pixels in, with no error anywhere — which is exactly what happened, and is why
+  the encoder is verified two ways: round-tripped through a decoder written from
+  the spec, and decoded by macOS `sips` (a real ImageIO decoder), both
+  pixel-identical to the source PNGs.
 
 ### Which buttons are the lanes
 
@@ -698,12 +734,22 @@ So every interesting frame has to be reachable without pressing a button:
 
 | Flag | Effect |
 |---|---|
-| `RB_DEBUG_AUTOSTART` | skips the title screen and starts the song immediately — **check this is 0 before shipping** |
+| `RB_DEBUG_AUTOSTART` | skips the title screen and starts the song immediately |
 | `RB_DEBUG_AUTOPLAY` | auto-hits every note at its exact hit time — drives the whole judgment path from a cold boot with zero input |
 | `RB_DEBUG_AUTOPLAY_OFFSET_MS` | offsets the synthetic press; a value between `RB_PERFECT_MS` and `RB_GOOD_MS` forces Goods |
 | `RB_DEBUG_AUTOPLAY_MISS_EVERY` | drops every Nth note so the miss path and combo reset are visible |
 | `RB_DEBUG_FREEZE_AT_MS` | clamps the song clock to a chosen elapsed value, so a `~1s` screenshot round trip cannot miss the moment |
+| `RB_DEBUG_TIME_SCALE` | runs the song N times slower, so a plain screenshot loop samples an even sequence of frames off ONE install — this is how the gameplay GIF is made |
 | `RB_DEBUG_LOG_JUDGMENTS` | logs every judged press — this is how real button input gets verified, since `pebble logs` keeps working even if screenshots are wedged |
+
+**`run_tests.sh` fails if any of these is left on**, so "remember to reset it
+before shipping" is enforced rather than merely written down. It needs to be:
+a debug build compiles, installs and looks exactly like a good one, and the
+capture build ran on the emulator unnoticed until two screenshots 12 s apart
+showed the combo advancing by one note where real time is about 47. Note
+`RB_DEBUG_TIME_SCALE` is a divisor, so its off value is `1`, not `0` — and that
+`pebble build` does not reinstall, so a capture session ends with a clean `.pbw`
+on disk and a debug build still on the emulator.
 
 The gameplay screenshot at the top of this file was taken that way: `AUTOSTART`
 and `AUTOPLAY` on, `FREEZE_AT_MS` 31050, then wait past that in real time before

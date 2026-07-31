@@ -282,6 +282,19 @@ static void prv_frame(void *data) {
   }
 #endif
 
+#if RB_DEBUG_TIME_SCALE > 1
+  // Slow motion for capturing animation. Applied BEFORE the freeze below so
+  // FREEZE_AT_MS keeps meaning a position in the song rather than a position in
+  // the stretched capture, and before autoplay and the step so all three stay on
+  // one timeline -- the same reason the freeze clamps rather than skips.
+  {
+    const uint32_t origin_ms = game_origin_ms();
+    if (now_ms > origin_ms) {
+      now_ms = origin_ms + (now_ms - origin_ms) / RB_DEBUG_TIME_SCALE;
+    }
+  }
+#endif
+
 #if RB_DEBUG_FREEZE_AT_MS
   // Hold the song still so a chosen moment can be captured; `pebble screenshot`
   // is a ~1s round trip and would otherwise always miss it.
