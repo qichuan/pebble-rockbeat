@@ -19,12 +19,13 @@ static void prv_lane_down(ClickRecognizerRef recognizer, void *context) {
   uint8_t lane = RB_LANE_NONE;
   if (button == BUTTON_ID_UP) {
     lane = RB_LANE_TOP;
-  } else if (button == BUTTON_ID_SELECT) {
+  } else if (button == BUTTON_ID_SELECT || button == BUTTON_ID_DOWN) {
+    // TWO buttons play the bottom lane. See the config provider for why.
     lane = RB_LANE_BOT;
   }
 
   if (s_handlers.on_lane_hit != NULL) {
-    s_handlers.on_lane_hit(lane, press_now_ms);
+    s_handlers.on_lane_hit(lane, button, press_now_ms);
   }
 }
 
@@ -48,18 +49,20 @@ void input_click_config_provider(void *context) {
   // the player held the button would be added to their timing. The up_handler is
   // NULL -- hold length carries no meaning here.
   //
-  // The LANES are UP and SELECT -- the top two buttons, adjacent, so both lanes
-  // are reachable without the thumb travelling the length of the stack. That is
-  // why the lower lane's badge is a RIGHT arrow rather than a down one: SELECT
-  // is the middle button, and pointing its badge downwards would name the wrong
-  // button. See chart.h for why the geometric "lane sits at its button" rule
-  // does not survive here.
+  // There are two LANES and three lane buttons. UP plays the top lane; SELECT
+  // and DOWN BOTH play the bottom one, so the player can alternate with
+  // whichever pair sits best under the thumb -- UP/SELECT are adjacent, which is
+  // what makes sixteenth-note alternation possible, while UP/DOWN are the ends
+  // of the stack and easier to find without looking.
+  //
+  // The badge on the lower lane stays a RIGHT arrow. It used to be right because
+  // a down arrow would have named the one button that did nothing during play,
+  // which is no longer true -- but it is still right, because the lane now has
+  // TWO buttons and an arrow can only name one of them. Right names none of
+  // them: it is the direction the notes travel. See chart.h for why the
+  // geometric "lane sits at its button" rule does not survive here.
   window_raw_click_subscribe(BUTTON_ID_UP, prv_lane_down, NULL, NULL);
   window_raw_click_subscribe(BUTTON_ID_SELECT, prv_lane_down, NULL, NULL);
-
-  // DOWN is subscribed but is NOT a gameplay lane. It reports RB_LANE_NONE,
-  // which the menus act on -- moving the song selection, quitting from pause --
-  // and the playfield ignores outright.
   window_raw_click_subscribe(BUTTON_ID_DOWN, prv_lane_down, NULL, NULL);
 
   // BACK must use single-click: pebble.h states the back button cannot take a

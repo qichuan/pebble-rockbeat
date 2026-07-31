@@ -299,27 +299,39 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   spectral-flux onset detector. The MIDI grid is exact where onset detection only
   approximated it, which is what fixed "the notes don't follow any rhythm".)
 
-- **The lanes are UP and DOWN, and the layout is ABSOLUTE, from the design.**
+- **The lane LAYOUT is ABSOLUTE, from the design** (which buttons play them is
+  the sub-bullets below, and has changed more than once).
   `rb_config.h` carries the exact y bands the design was drawn at (HUD 0-56,
   lanes 56-106 and 112-162, song band 168-220, progress 220-228). They are not
   derived from `layer_get_bounds()` any more: the design was composed at 200x228
   for this screen, and deriving them would only invent a layout nobody drew. The
   width still comes from bounds so right-hand furniture stays anchored.
-  - **The lanes are UP and SELECT; DOWN is not a lane.** Three arrangements have
-    shipped and the current one deliberately BREAKS the "lane sits at its
-    button's vertical position" rule: SELECT is the middle button and it plays
-    the lower band. Adjacent buttons won over aligned ones because alternating
-    at sixteenth-note rates is the game, and the ends of the stack are easy to
-    find but slow to alternate between. README's "Which buttons are the lanes"
-    has the full history -- read it before changing this again.
+  - **TWO lanes, THREE lane buttons: UP is the top lane, SELECT and DOWN BOTH
+    play the bottom one.** The mapping is many-to-one on purpose. UP+SELECT are
+    adjacent, which is what makes sixteenth-note alternation possible; UP+DOWN
+    are the ends of the stack, slower to alternate but findable without looking.
+    Offering both costs nothing because there is no third band for DOWN to want,
+    so the player picks whichever pair suits their thumb. Three arrangements
+    shipped before this; the current one still BREAKS the "lane sits at its
+    button's vertical position" rule, since the lower band now answers to the
+    middle button as well as the bottom one. README's "Which buttons are the
+    lanes" has the full history -- read it before changing this again.
   - Because of that, the lower lane's badge is a **RIGHT** arrow
-    (`prv_draw_arrow` in render.c), never a down one: a down arrow would point at
-    the one button that does nothing during play. Right is the direction the
-    notes travel, which names no button at all.
-  - `main.c` reads the lane value through `RB_BTN_UP`/`RB_BTN_SELECT`/
-    `RB_BTN_DOWN` for its menus. `input.c` reports LANES; the menus need BUTTONS.
-    One mapping in one place, so a future remap cannot silently swap "play" and
-    "quit" underneath render.c's on-screen legends.
+    (`prv_draw_arrow` in render.c), never a down one. The original reason was
+    that a down arrow would point at the one button that did nothing during
+    play; that is no longer true, but the conclusion survives for a better
+    reason -- the lane has TWO buttons and an arrow can only name one. Right
+    names neither: it is the direction the notes travel.
+  - **The menus must branch on `ButtonId`, never on the lane value.** They used
+    to do the latter, through `RB_BTN_UP`/`RB_BTN_SELECT`/`RB_BTN_DOWN` aliases
+    of the lane constants, which worked only while three buttons held three
+    distinct lane values. Giving DOWN the bottom lane destroyed that invariant:
+    the aliases would have made SELECT and DOWN equal, so the title screen would
+    have STARTED the song on DOWN instead of moving the selection and the pause
+    screen would have RESUMED instead of quitting -- silently contradicting
+    render.c's on-screen legends. `input.c` therefore reports the lane *and* the
+    `ButtonId`; the playfield reads the lane, the menus read the button, and a
+    future lane remap cannot reach the menus at all.
   - `RB_LANE_MID` was renamed `RB_LANE_BOT`. `LANE_NAMES` in make_chart.py must
     stay bottom-most-first: `build_chart()` puts notes above the melody's median
     in lane 1, and the higher pitch has to land in the higher lane.
@@ -478,10 +490,15 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   title screen, which is where the song selector now is. `save.c` no longer
   stores them.
 
-- **DOWN is subscribed, but it is NOT a lane.** It reports `RB_LANE_NONE`
-  (0xFF, deliberately outside the `RbLane` enum so it can never index a
-  lane-sized array). Menus use it to move the selection; `main.c` ignores it
-  during play. Do not alias it onto a lane — there is no third band.
+- **DOWN plays the bottom lane, and it is also the menus' "next" button.** Those
+  two jobs coexist because the screens are disjoint: during play `main.c` reads
+  the lane, and on the title/pause screens it reads the `ButtonId`. It was NOT a
+  lane until recently — if you find a comment saying so, it is stale.
+- **`RB_LANE_NONE` (0xFF) no longer means DOWN.** It is deliberately outside the
+  `RbLane` enum so it can never index a lane-sized array, and every consumer has
+  to decide what to do with it. Now that all three subscribed buttons map to a
+  lane, `input.c` never emits it for a real press: it survives as that function's
+  defensive default and as `feedback.c`'s "nothing has been hit yet" sentinel.
 
 - **Music chunks are bounded in MILLISECONDS, not bars** (`CHUNK_MAX_MS`). Bars
   were the unit until a song at half the tempo made 8 bars 32.5s instead of

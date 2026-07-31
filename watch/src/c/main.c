@@ -120,25 +120,37 @@ static void prv_lane_hit(uint8_t lane, uint32_t press_now_ms) {
   // Redraw immediately rather than waiting up to a frame: the flash should
   // appear on the press, not a frame later. Only the field and the HUD can have
   // changed -- the band is untouched by a hit.
-  layer_mark_dirty(s_canvas);
+  //
+  // But ONLY when something actually changed. A stray press consumes no note:
+  // game_judge_hit() returns before prv_apply() and feedback_hit() returns
+  // before touching a flash, so the next frame is pixel-identical to this one.
+  // Forcing it anyway costs a WHOLE-WINDOW repaint (layer_mark_dirty does not
+  // do partial rects here) on the app task, which is the scarce resource on
+  // hardware and the one the emulator hides. Strays are not rare -- they are
+  // what pressing between notes produces -- and the bottom lane now has two
+  // buttons feeding them, so this went from unconditional-but-bounded to a
+  // genuine load regression when DOWN became a lane.
+  if (judgment != RB_JUDGE_NONE) {
+    layer_mark_dirty(s_canvas);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Input dispatch -- one provider serves every screen; the handlers branch on
 // game_screen() rather than re-subscribing on each transition.
 //
-// input.c reports which LANE was struck, because that is all the playfield
-// cares about. The menus care which BUTTON was pressed, so they read the same
-// value through these names. Keeping the mapping in one place is what stops a
-// future lane remap from silently swapping "play" and "quit" underneath the
-// on-screen legends in render.c.
+// input.c reports both which LANE was struck and which BUTTON struck it. The
+// playfield reads the lane; the menus read the button, and must NOT infer one
+// from the other. They used to: three buttons held three distinct lane values,
+// so #defines aliased RB_BTN_SELECT to RB_LANE_BOT and so on. That stopped
+// working the moment SELECT and DOWN both played the bottom lane -- the aliases
+// would have made them the same value, and the title screen would have started
+// the song on DOWN while the pause screen resumed instead of quitting, silently
+// contradicting render.c's on-screen legends. Branch on the ButtonId.
 // ---------------------------------------------------------------------------
 
-#define RB_BTN_UP     RB_LANE_TOP
-#define RB_BTN_SELECT RB_LANE_BOT
-#define RB_BTN_DOWN   RB_LANE_NONE
-
-static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
+static void prv_on_lane_hit(uint8_t lane, ButtonId button,
+                            uint32_t press_now_ms) {
   switch (game_screen()) {
     case RB_SCREEN_PLAYING:
       if (lane < RB_LANE_COUNT) {
@@ -149,11 +161,11 @@ static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
     case RB_SCREEN_TITLE:
       // UP and DOWN move the selection, matching the buttons' physical order --
       // UP goes up the list. SELECT plays what is chosen.
-      if (lane == RB_BTN_SELECT) {
+      if (button == BUTTON_ID_SELECT) {
         prv_start_song();
       } else {
         const uint8_t count = chart_count();
-        if (lane == RB_BTN_UP) {
+        if (button == BUTTON_ID_UP) {
           s_song = (uint8_t)((s_song + count - 1) % count);
         } else {
           s_song = (uint8_t)((s_song + 1) % count);
@@ -174,9 +186,9 @@ static void prv_on_lane_hit(uint8_t lane, uint32_t press_now_ms) {
       break;
 
     case RB_SCREEN_PAUSED:
-      if (lane == RB_BTN_SELECT) {
+      if (button == BUTTON_ID_SELECT) {
         prv_resume();
-      } else if (lane == RB_BTN_UP) {
+      } else if (button == BUTTON_ID_UP) {
         prv_start_song();
       } else {
         prv_enter_title();

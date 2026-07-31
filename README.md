@@ -19,15 +19,17 @@ of the watch. Notes ("pebbles") scroll left to right toward a fixed
 hit target beside the buttons; press that lane's button as a note arrives.
 
 ```
-  TOP lane    ->  UP button       (orange, badge points UP)
-  BOTTOM lane ->  SELECT button   (blue,   badge points RIGHT)
-  DOWN        ->  menus only; never a lane
-  BACK        ->  pause / exit    (never used for gameplay)
+  TOP lane    ->  UP button              (orange, badge points UP)
+  BOTTOM lane ->  SELECT *or* DOWN       (blue,   badge points RIGHT)
+  BACK        ->  pause / exit           (never used for gameplay)
 ```
 
 Two lanes rather than three: it is easier to play, and it turns the game into a
-two-handed alternation. See "Which buttons are the lanes" below — the answer has
-changed twice, and the reasoning matters more than the answer.
+two-handed alternation. Two buttons play the bottom lane so you can choose your
+own pair — UP+SELECT are adjacent and alternate fastest, UP+DOWN are the ends of
+the stack and are findable without looking. See "Which buttons are the lanes"
+below — the answer has changed three times, and the reasoning matters more than
+the answer.
 
 Hits are judged Perfect / Good / Miss on timing accuracy, with a running score
 and combo counter.
@@ -275,7 +277,7 @@ stdlib only, like every other tool here. Two things worth knowing:
 
 ### Which buttons are the lanes
 
-Three arrangements have shipped, and the reasoning is worth keeping because each
+Four arrangements have shipped, and the reasoning is worth keeping because each
 one traded away something real.
 
 1. **UP + SELECT**, with the lane bands placed at the buttons' own vertical
@@ -284,30 +286,45 @@ one traded away something real.
 2. **UP + DOWN**, when the UI was redrawn to the design. The two ends of the
    button stack can both be found without looking, which SELECT — boxed in by
    its neighbours — cannot.
-3. **UP + SELECT again**, which is what ships. The two ends of the stack are
-   easy to *find* but far apart to *alternate between*, and alternating at
-   sixteenth-note rates is the entire game. Adjacent buttons sit under one thumb.
+3. **UP + SELECT again.** The two ends of the stack are easy to *find* but far
+   apart to *alternate between*, and alternating at sixteenth-note rates is the
+   entire game. Adjacent buttons sit under one thumb.
+4. **UP + SELECT *and* DOWN**, which is what ships: the bottom lane answers to
+   two buttons. Steps 2 and 3 were a forced choice between "findable" and
+   "fast", and it turns out nothing forced it. There is no third band for DOWN
+   to play, so letting it double the bottom lane costs nothing and lets the
+   player pick the pair that suits their thumb.
 
-That last swap breaks premise 1: SELECT is the middle button, but the lane it
-plays is the lower band. The layout is the design's and does not move, so the
-mismatch is handled by never *claiming* otherwise — the lower lane's badge is a
-**right** arrow, the direction the notes travel, and never a down arrow, which
-would point squarely at the one button that does nothing during play.
+Step 3 broke premise 1 — SELECT is the middle button but plays the lower band —
+and step 4 breaks it further, since that band now answers to two buttons at
+once. The layout is the design's and does not move, so the mismatch is handled
+by never *claiming* otherwise: the lower lane's badge is a **right** arrow, the
+direction the notes travel. It was originally right because a down arrow would
+have pointed at the one button that did nothing during play; that reason is now
+gone, but the arrow stays, because a lane with two buttons cannot have an arrow
+that names one of them without lying about the other.
 
 ## Controls
 
 | Screen | UP | SELECT | DOWN | BACK |
 |---|---|---|---|---|
 | Title | previous song | play selected song | next song | exit the app |
-| Playing | TOP lane | BOTTOM lane | (ignored) | pause |
+| Playing | TOP lane | BOTTOM lane | BOTTOM lane | pause |
 | Paused | restart | resume | quit to title | quit to title |
 | Results | to title | to title | to title | to title |
 
-`input.c` reports which *lane* was struck, because that is all the playfield
-cares about; `main.c` reads the same value through `RB_BTN_UP` / `RB_BTN_SELECT`
-/ `RB_BTN_DOWN` for the menus, which care which *button* was pressed. Keeping
-that mapping in one place is what stops the next lane remap from silently
-swapping "play" and "quit" underneath the on-screen legends.
+Note the same button does different work on different screens, which is why
+`input.c` reports both which *lane* was struck and which *button* struck it. The
+playfield reads the lane; the menus read the button.
+
+They used to read one value for both, via `RB_BTN_UP` / `RB_BTN_SELECT` /
+`RB_BTN_DOWN` aliases of the lane constants — which worked only while three
+buttons carried three distinct lane values. Giving DOWN the bottom lane
+destroyed that invariant: the aliases would have made SELECT and DOWN equal, so
+DOWN would have *started the song* on the title screen instead of moving the
+selection, and *resumed* from the pause screen instead of quitting — both
+silently contradicting the on-screen legends. Passing the `ButtonId` separately
+is what makes a lane remap unable to reach the menus at all.
 
 Sound and haptics are always on — the buttons that once toggled them now choose
 the song, and a rhythm game with the sound off is not the thing anyway.
@@ -316,9 +333,10 @@ the song, and a rhythm game with the sound off is not the thing anyway.
 meaningless across songs of different length and density; one would permanently
 mask the other.
 
-DOWN is subscribed but is deliberately *not* a gameplay lane: there is no third
-band for it to point at. It reports a sentinel that the menus act on and the
-playfield ignores.
+DOWN doing double duty — a gameplay lane *and* the menus' "next" — is safe only
+because the screens are disjoint: nothing is both playing and in a menu. The
+`RB_LANE_NONE` sentinel it used to report is now unreachable from a real press,
+and survives as a defensive default and as feedback.c's "nothing hit yet" mark.
 
 ## The songs
 

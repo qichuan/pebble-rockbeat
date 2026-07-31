@@ -19,30 +19,36 @@
 // walking 0..RB_LANE_COUNT downward, and everything else is sized from
 // RB_LANE_COUNT rather than from the number 3.
 //
-// Two lanes, played with UP and SELECT -- the top two buttons, adjacent. The
-// thumb rests across both, so alternating hands at sixteenth-note rates does not
-// require travelling the length of the button stack, which UP+DOWN did.
+// Two lanes, three lane buttons: UP plays the top lane, and SELECT and DOWN
+// BOTH play the bottom one. The mapping is many-to-one on purpose. UP+SELECT
+// are adjacent, so the thumb rests across both and can alternate at
+// sixteenth-note rates without travelling the button stack; UP+DOWN are its
+// ends, slower to alternate but easy to find without looking. Offering both
+// costs nothing, because there is no third band for DOWN to want.
 //
 // The cost is that lane 1 breaks the "a lane sits at its button's vertical
-// position" rule: SELECT is the middle button and the lower lane is the lower
-// band. Nothing on screen may therefore claim otherwise -- in particular the
-// lower lane's badge is a RIGHT arrow, never a DOWN one, because a down arrow
-// would point at the button that is not a lane. Both earlier arrangements are
-// recorded in README.md.
+// position" rule: the lower band answers to the middle button as well as the
+// bottom one. Nothing on screen may therefore claim otherwise -- in particular
+// the lower lane's badge is a RIGHT arrow, never a DOWN one, because the lane
+// has two buttons and an arrow can only name one. Right names neither: it is
+// the direction the notes travel. Earlier arrangements are recorded in
+// README.md.
 //
 // Note the knock-on effect documented in tools/make_chart.py: with only two
 // lanes the same-lane spacing rule leaves offbeats nowhere legal to go.
 typedef enum {
   RB_LANE_TOP = 0,  // UP button
-  RB_LANE_BOT,      // SELECT button
+  RB_LANE_BOT,      // SELECT or DOWN button
   RB_LANE_COUNT,
 } RbLane;
 
-// Reported for a button press that is not a gameplay lane -- DOWN, which moves
-// the song selection and quits from the pause screen but never hits a note.
-// Deliberately outside the enum: it must never index a lane-sized array, and
-// every consumer has to decide what to do with it rather than silently treating
-// it as lane 0.
+// "No lane." Deliberately outside the enum: it must never index a lane-sized
+// array, and every consumer has to decide what to do with it rather than
+// silently treating it as lane 0.
+//
+// Every subscribed button now plays a lane, so input.c no longer emits this for
+// a real press -- it is the defensive default there, and feedback.c's "nothing
+// has been hit yet" sentinel. Do not assume it means DOWN; it did once.
 #define RB_LANE_NONE 0xFF
 
 typedef enum {
