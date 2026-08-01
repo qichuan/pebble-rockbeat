@@ -243,6 +243,17 @@ static void prv_draw_targets(GContext *ctx, uint32_t elapsed_ms) {
       // Resting: a hollow ring in the lane's accent with one mark inside it per
       // button that plays the lane, so the mapping -- including the second
       // button on the lower lane -- is legible without a legend.
+      //
+      // A press that hit nothing still fills the ring's hole with the lane's own
+      // BED colour. Deliberately dim, and deliberately keeping the ring and the
+      // badge on top: a hit is a bright white-and-accent burst that covers the
+      // badge entirely, so the two can never be confused. This one reads as the
+      // pad going down, not as a score.
+      if (feedback_lane_pressed(lane, elapsed_ms)) {
+        graphics_context_set_fill_color(ctx, prv_lane_bed(lane));
+        graphics_fill_circle(ctx, centre, (int16_t)(RB_TARGET_R - RB_TARGET_RING_W));
+      }
+
       graphics_context_set_stroke_color(ctx, accent);
       graphics_context_set_stroke_width(ctx, RB_TARGET_RING_W);
       graphics_draw_circle(ctx, centre, RB_TARGET_R - RB_TARGET_RING_W / 2);

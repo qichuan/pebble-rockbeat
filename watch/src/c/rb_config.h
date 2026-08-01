@@ -236,6 +236,17 @@
 // frame counter, so it is deterministic.
 #define RB_FLASH_MS 150
 
+// How long a target acknowledges a BUTTON PRESS, whether or not it hit anything.
+// A press that judges lights the hit flash instead, which outlasts this and is
+// checked first, so the two never fight.
+//
+// Deliberately shorter than RB_FLASH_MS: this is "the pad went down", not "you
+// scored", and it must never be mistaken for the latter. But it cannot go below
+// two frames (2 * RB_FRAME_MS = 80ms) or a press can land and expire between
+// redraws and never be seen at all -- nothing forces a repaint for it, by
+// design; see prv_lane_hit() in main.c.
+#define RB_PRESS_FLASH_MS 100
+
 // The charted excerpt has 288 notes; the pool leaves room to re-generate a
 // denser one without touching code. Costs one byte of RAM per note.
 #define RB_MAX_NOTES 320

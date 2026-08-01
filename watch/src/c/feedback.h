@@ -18,12 +18,23 @@
 
 void feedback_reset(void);
 
-// Records a judged hit: lights that lane's flash and fires the matching vibe.
+// Records a press on a lane. Lights that lane's press blink unconditionally, and
+// when the press judged, its hit flash and the matching vibe too.
+//
+// Called for EVERY press, including strays that consumed no note: the target
+// answers the button, so a player can see which lane a button drives without
+// having to hit something first.
 void feedback_hit(uint8_t lane, RbJudgment judgment, const ChartNote *note,
                   uint32_t elapsed_ms);
 
 // RB_JUDGE_NONE when the lane is not currently flashing.
 RbJudgment feedback_lane_flash(uint8_t lane, uint32_t elapsed_ms);
+
+// Whether the lane's button was pressed within RB_PRESS_FLASH_MS. Independent of
+// feedback_lane_flash(): a stray press blinks without ever being a judgment, and
+// a judged one is both at once -- so render.c checks the flash FIRST and only
+// falls back to this, or a hit would be drawn as a mere press.
+bool feedback_lane_pressed(uint8_t lane, uint32_t elapsed_ms);
 
 // Most recent judgment, for the HUD readout. RB_JUDGE_NONE once it has aged out.
 RbJudgment feedback_last_judgment(uint32_t elapsed_ms);

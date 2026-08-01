@@ -121,15 +121,18 @@ static void prv_lane_hit(uint8_t lane, uint32_t press_now_ms) {
   // appear on the press, not a frame later. Only the field and the HUD can have
   // changed -- the band is untouched by a hit.
   //
-  // But ONLY when something actually changed. A stray press consumes no note:
-  // game_judge_hit() returns before prv_apply() and feedback_hit() returns
-  // before touching a flash, so the next frame is pixel-identical to this one.
-  // Forcing it anyway costs a WHOLE-WINDOW repaint (layer_mark_dirty does not
-  // do partial rects here) on the app task, which is the scarce resource on
-  // hardware and the one the emulator hides. Strays are not rare -- they are
-  // what pressing between notes produces -- and the bottom lane now has two
-  // buttons feeding them, so this went from unconditional-but-bounded to a
-  // genuine load regression when DOWN became a lane.
+  // But ONLY when a note was consumed. A stray press DOES change the next frame
+  // now -- feedback_hit() lights the lane's press blink whatever the judgment --
+  // so this is no longer "nothing happened"; it is the blink accepting up to one
+  // frame of latency, RB_FRAME_MS, which is 40ms and below notice.
+  //
+  // That is the whole reason the blink is free. Forcing the repaint costs a
+  // WHOLE-WINDOW paint (layer_mark_dirty does not do partial rects here) on the
+  // app task, which is the scarce resource on hardware and the one the emulator
+  // hides. Strays are not rare -- they are what pressing between notes produces
+  // -- and the bottom lane has two buttons feeding them, so paying a repaint per
+  // stray was a genuine load regression when DOWN became a lane. The frame timer
+  // is already redrawing 25 times a second during play; the blink rides that.
   if (judgment != RB_JUDGE_NONE) {
     layer_mark_dirty(s_canvas);
   }
