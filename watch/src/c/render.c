@@ -29,6 +29,24 @@
 #define RB_C_LANE_BOT_RAIL  RB_ARGB(0b11000110)  // #0055AA
 #define RB_C_LANE_BOT_ACC   RB_ARGB(0b11001011)  // #00AAFF blue
 
+// The bottom lane's badge: a bar for SELECT above a down arrow for DOWN. Kept
+// local to this file rather than added to rb_config.h because they are not
+// tunables -- they are the geometry of one mark, sized once to fit the ring, and
+// nothing outside render.c can use them.
+//
+// The bar is deliberately WIDER than the arrow (16 against 13) and the arrow is
+// below the design size, so the two marks are not competing for the same weight.
+// The top lane's arrow is untouched at RB_ARROW_LEN/RB_ARROW_HALF.
+//
+// Stack height is BAR_H + BAR_GAP + BADGE_ARROW_LEN = 19, which is ODD so it
+// centres exactly on the ring; keep it odd if you retune these. Worst pixel is a
+// bar corner at (8, 9) -- r=12.0 against the ring's 15px clear radius.
+#define RB_BADGE_BAR_W 16
+#define RB_BADGE_BAR_H 6
+#define RB_BADGE_BAR_GAP 4
+#define RB_BADGE_ARROW_LEN 9
+#define RB_BADGE_ARROW_HALF 6
+
 // One record colour per song, so the art tile is not the same plate every time.
 static GColor prv_song_art(uint8_t song) {
   switch (song) {
@@ -63,37 +81,68 @@ static const char *prv_judgment_text(RbJudgment judgment) {
 // Primitives
 // ---------------------------------------------------------------------------
 
-// The badge inside a target ring: the arrow that names the lane's button.
+// A triangle, apex up or down, drawn as stacked 1px fill_rect strips rather than
+// text: the Gothic system fonts carry no arrow glyphs, so a literal triangle
+// character renders as tofu. No GPath either -- that would mean a heap
+// allocation. The caller sets the fill colour.
 //
-// Drawn as stacked fill_rect strips rather than text: the Gothic system fonts
-// carry no arrow glyphs, so a literal triangle character renders as tofu. No
-// GPath either -- that would mean a heap allocation.
+// The two orientations are one taper on one axis, so pointing_up only chooses
+// which end the apex sits at.
 //
-// UP for the top lane and RIGHT for the bottom one. Not DOWN: the bottom lane is
-// played with SELECT, the MIDDLE button, so a down arrow would point squarely at
-// the one button that does nothing during play. Right is the direction the notes
-// themselves travel, which reads as "the near one" without naming a direction
-// that is wrong.
-static void prv_draw_arrow(GContext *ctx, int16_t cx, int16_t cy, bool pointing_up) {
-  if (pointing_up) {
-    for (int16_t i = 0; i < RB_ARROW_LEN; i++) {
-      const int16_t half = (int16_t)((RB_ARROW_HALF * (i + 1)) / RB_ARROW_LEN);
-      graphics_fill_rect(
-          ctx, GRect((int16_t)(cx - half), (int16_t)(cy - RB_ARROW_LEN / 2 + i),
-                     (int16_t)(half * 2 + 1), 1),
-          0, GCornerNone);
-    }
+// len/half are arguments rather than RB_ARROW_LEN/RB_ARROW_HALF directly because
+// the two badges want different sizes: the top lane's arrow is the whole mark
+// and stays at the design size, while the bottom lane's shares its ring with the
+// SELECT bar and is drawn smaller so the bar can carry the weight.
+static void prv_draw_arrow(GContext *ctx, int16_t cx, int16_t cy, int16_t len,
+                           int16_t half_w, bool pointing_up) {
+  for (int16_t i = 0; i < len; i++) {
+    const int16_t step = pointing_up ? (int16_t)(i + 1) : (int16_t)(len - i);
+    const int16_t half = (int16_t)((half_w * step) / len);
+    graphics_fill_rect(ctx,
+                       GRect((int16_t)(cx - half), (int16_t)(cy - len / 2 + i),
+                             (int16_t)(half * 2 + 1), 1),
+                       0, GCornerNone);
+  }
+}
+
+// The badge inside a resting target ring: the buttons that play this lane.
+//
+// One mark per button, stacked in the buttons' own physical order. The top lane
+// has a single button and gets a single UP arrow; the bottom lane has two and
+// gets two marks, a bar for SELECT above a down arrow for DOWN.
+//
+// That count is the whole point. The badge used to be one arrow per lane, which
+// forced the lower one to point RIGHT -- the direction the notes travel -- since
+// an arrow names a direction and the lane has two buttons in different
+// directions. It therefore named no button at all, and players were not finding
+// DOWN. Two marks name both, and a plain DOWN arrow was rejected for the
+// opposite failure: it reads as "an UP/DOWN game" and steers players off
+// UP+SELECT, the adjacent pair that makes sixteenth-note alternation possible.
+//
+// The bar is the larger of the two marks and the arrow is drawn below the design
+// size. Two marks in one ring compete, and the bar is the one that has to win a
+// squint: an arrow is already a familiar shape that survives being small, while
+// a short bar reads as a stray tick.
+//
+// The stack is derived from the constants rather than hardcoded, so retuning any
+// of them keeps it centred. The caller sets the fill colour.
+static void prv_draw_lane_badge(GContext *ctx, int16_t cx, int16_t cy, uint8_t lane) {
+  if (lane == RB_LANE_TOP) {
+    prv_draw_arrow(ctx, cx, cy, RB_ARROW_LEN, RB_ARROW_HALF, true);
     return;
   }
 
-  // Same triangle with the axes swapped: columns narrowing left to right.
-  for (int16_t i = 0; i < RB_ARROW_LEN; i++) {
-    const int16_t half = (int16_t)((RB_ARROW_HALF * (RB_ARROW_LEN - i)) / RB_ARROW_LEN);
-    graphics_fill_rect(
-        ctx, GRect((int16_t)(cx - RB_ARROW_LEN / 2 + i), (int16_t)(cy - half), 1,
-                   (int16_t)(half * 2 + 1)),
-        0, GCornerNone);
-  }
+  const int16_t span =
+      (int16_t)(RB_BADGE_BAR_H + RB_BADGE_BAR_GAP + RB_BADGE_ARROW_LEN);
+  const int16_t top = (int16_t)(cy - span / 2);
+  graphics_fill_rect(ctx,
+                     GRect((int16_t)(cx - RB_BADGE_BAR_W / 2), top, RB_BADGE_BAR_W,
+                           RB_BADGE_BAR_H),
+                     0, GCornerNone);
+  prv_draw_arrow(
+      ctx, cx,
+      (int16_t)(top + RB_BADGE_BAR_H + RB_BADGE_BAR_GAP + RB_BADGE_ARROW_LEN / 2),
+      RB_BADGE_ARROW_LEN, RB_BADGE_ARROW_HALF, false);
 }
 
 static void prv_draw_text(GContext *ctx, const char *text, const char *font_key, GRect box,
@@ -191,15 +240,27 @@ static void prv_draw_targets(GContext *ctx, uint32_t elapsed_ms) {
     const GColor accent = prv_lane_accent(lane);
 
     if (flash == RB_JUDGE_NONE) {
-      // Resting: a hollow ring in the lane's accent with that button's own arrow
-      // inside it, so the mapping is legible without a legend.
+      // Resting: a hollow ring in the lane's accent with one mark inside it per
+      // button that plays the lane, so the mapping -- including the second
+      // button on the lower lane -- is legible without a legend.
+      //
+      // A press that hit nothing still fills the ring's hole with the lane's own
+      // BED colour. Deliberately dim, and deliberately keeping the ring and the
+      // badge on top: a hit is a bright white-and-accent burst that covers the
+      // badge entirely, so the two can never be confused. This one reads as the
+      // pad going down, not as a score.
+      if (feedback_lane_pressed(lane, elapsed_ms)) {
+        graphics_context_set_fill_color(ctx, prv_lane_bed(lane));
+        graphics_fill_circle(ctx, centre, (int16_t)(RB_TARGET_R - RB_TARGET_RING_W));
+      }
+
       graphics_context_set_stroke_color(ctx, accent);
       graphics_context_set_stroke_width(ctx, RB_TARGET_RING_W);
       graphics_draw_circle(ctx, centre, RB_TARGET_R - RB_TARGET_RING_W / 2);
       graphics_context_set_stroke_width(ctx, 1);
 
       graphics_context_set_fill_color(ctx, accent);
-      prv_draw_arrow(ctx, centre.x, centre.y, lane == RB_LANE_TOP);
+      prv_draw_lane_badge(ctx, centre.x, centre.y, lane);
       continue;
     }
 

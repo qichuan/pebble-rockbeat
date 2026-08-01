@@ -15,6 +15,11 @@ static LaneFlash s_flash[RB_LANE_COUNT];
 static uint8_t s_last_judgment;
 static uint32_t s_last_until_ms;
 
+// When each lane's press blink expires. Separate from s_flash because a press is
+// not a judgment: most presses consume no note, and the target still has to
+// answer the button so the player can find out which lane it drives.
+static uint32_t s_press_until_ms[RB_LANE_COUNT];
+
 // Which lane the most recent judged hit landed in. The judgment popup belongs
 // to a lane, and render.c used to work that out by scanning for a lane whose
 // flash matched the judgment -- which silently defaulted to lane 0 whenever the
@@ -37,6 +42,7 @@ void feedback_reset(void) {
   for (uint8_t i = 0; i < RB_LANE_COUNT; i++) {
     s_flash[i].judgment = RB_JUDGE_NONE;
     s_flash[i].until_ms = 0;
+    s_press_until_ms[i] = 0;
   }
   s_last_judgment = RB_JUDGE_NONE;
   s_last_until_ms = 0;
@@ -114,8 +120,15 @@ static void prv_vibe(const ChartNote *note, uint32_t elapsed_ms) {
 
 void feedback_hit(uint8_t lane, RbJudgment judgment, const ChartNote *note,
                   uint32_t elapsed_ms) {
+  // The press is acknowledged before anything is judged, so a stray still
+  // lights its target. This is the only feedback a player gets for "that button
+  // drives THIS lane" without landing a note first.
+  if (lane < RB_LANE_COUNT) {
+    s_press_until_ms[lane] = elapsed_ms + RB_PRESS_FLASH_MS;
+  }
+
   if (judgment == RB_JUDGE_NONE) {
-    return;  // stray press -- no note consumed, so nothing to report
+    return;  // stray press -- blinked above, but nothing scored to report
   }
 
   if (lane < RB_LANE_COUNT) {
@@ -139,6 +152,10 @@ RbJudgment feedback_lane_flash(uint8_t lane, uint32_t elapsed_ms) {
     return RB_JUDGE_NONE;
   }
   return (RbJudgment)s_flash[lane].judgment;
+}
+
+bool feedback_lane_pressed(uint8_t lane, uint32_t elapsed_ms) {
+  return (lane < RB_LANE_COUNT) && (elapsed_ms < s_press_until_ms[lane]);
 }
 
 uint8_t feedback_last_lane(void) {
