@@ -2,7 +2,7 @@
 
 A Taiko-style rhythm game for the Pebble Time 2.
 
-Download it from [Pebble App Store](https://apps.repebble.com/d562cbb697be4a8faafceeea)
+Download it from [Pebble App Store](https://apps.repebble.com/68b7d031bd624a9ebaeb9102)
 
 | Pick a song | Play | Results |
 |:---:|:---:|:---:|
