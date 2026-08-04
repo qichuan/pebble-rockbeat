@@ -20,35 +20,35 @@
 static bool s_enabled = true;
 static bool s_playing;
 static bool s_suppressed;
-static uint16_t s_next_chunk;
-
-// The chunk waiting to be released, and the song time to release it at. Armed
-// by audio_song_start(), fired by audio_tick(). Deliberately NOT an AppTimer --
-// see the comment on audio_tick().
-static bool s_armed;
-static uint16_t s_armed_chunk;
-static uint32_t s_armed_at_ms;
 
 // Which song's music is playing. Set once at audio_song_start() and read by
 // every music_chunk() lookup, so a chunk can never be fetched from a song other
 // than the one whose chart is on screen.
 static uint8_t s_song;
 
+// The chunk waiting to be handed to the sequencer. EVERY chunk goes through
+// this, including the first and including a mid-song boundary -- see the note
+// on scheduling below. `s_release_at_ms` is when to make the speaker call;
+// `s_due_ms` is when the chunk's first note should actually sound, and the two
+// differ by the measured cost of the call.
+static bool s_armed;
+static uint16_t s_armed_chunk;
+static uint32_t s_release_at_ms;
+static uint32_t s_due_ms;
+
 // Set by the speaker's finish callback, consumed by the app task. `volatile`
-// because the two run in different contexts and the compiler must not cache
+// because the two may run in different contexts and the compiler must not cache
 // either across the frame loop's read.
 static volatile bool s_finished;
 static volatile uint8_t s_finish_reason;
 
-// Song time by which the playing chunk should have reported finishing. The
-// watchdog in audio_tick() uses it; see the note there.
-static uint32_t s_deadline_ms;
+// Where the chunk currently sounding was supposed to stop sounding. Only read
+// to log the calibration residual; nothing schedules off it.
+static uint32_t s_content_end_ms;
 
-static void prv_play_chunk(uint16_t index, uint32_t elapsed_ms);
-
-// Song time at which a chunk should be handed to the sequencer. One definition,
-// used by both the initial release and the boundary re-anchor, so the two can
-// never disagree about where the music belongs.
+// Song time at which a chunk's first note should SOUND. One definition, used by
+// every scheduling decision, so nothing can disagree about where the music
+// belongs.
 static uint32_t prv_chunk_due_ms(const MusicChunk *chunk) {
   const int32_t due_ms =
       (int32_t)RB_MUSIC_START_MS + (int32_t)chunk->start_ms + RB_MUSIC_OFFSET_MS;
@@ -56,114 +56,101 @@ static uint32_t prv_chunk_due_ms(const MusicChunk *chunk) {
 }
 
 // ---------------------------------------------------------------------------
-// Chunk chaining, and re-anchoring the music to the song clock
+// Scheduling: every chunk is anchored to the song clock, INDEPENDENTLY.
 //
-// A chunk boundary is where the next batch of notes is handed over -- and it is
-// also the ONLY place the music can be re-synchronised, because the sequencer
-// plays a note list and reports no position, so nothing can be corrected part
-// way through a chunk.
+// The obvious design -- and the one this had until it was measured on real
+// hardware -- is to chain: hand the next chunk over when the current one reports
+// finishing. It is wrong, and the emulator cannot show why, because the cost it
+// hides is zero there and large on the watch.
 //
-// That matters because the two timelines are driven by different things: the
-// notes advance on the song clock, the speaker advances on real time. Any
-// difference between those rates accumulates. It was measured at 1346ms by the
-// first boundary and ~2100ms by the fourth -- the music was most of two beats
-// ahead of the notes it was supposed to accompany. Most of that was the song
-// clock losing time while it calibrated (fixed in clock.c), but nothing here
-// could have detected it, let alone corrected it.
+// MEASURED on a Pebble Time 2: a speaker_play_tracks() call does not start
+// sounding immediately. It costs ~170ms every time -- see RB_MUSIC_CALL_MS for
+// the samples and for why it is one constant rather than a cold-start ramp.
+// Chaining pays that cost ONCE PER CHUNK and then carries it forever, because
+// the next chunk cannot start until the current one ends and the current one
+// already started late. The lag ratcheted up at every boundary -- 522ms, 752ms,
+// 883ms behind the notes -- and nothing could pull it back, because music
+// running late cannot be fast-forwarded: the note list would have to be
+// re-emitted and there is nowhere to do that.
 //
-// So the handover compares song time against where the next chunk is supposed to
-// start. Within RB_MUSIC_RESYNC_MS it goes out as soon as the app task can send
-// it; beyond it, when the music has run ahead, the chunk is held until the song
-// clock catches up -- a short silence at a note boundary, in exchange for the
-// music and the notes being the same thing again.
+// So the chain is gone. Each chunk is released at
 //
-// Only early is corrected. Music that is running LATE cannot be fast-forwarded:
-// the note list would have to be re-emitted, and there is nowhere to do that.
+//     due_ms - (the measured cost of the call)
+//
+// which puts the sound on the note rather than behind it, and -- the part that
+// actually matters -- makes every chunk's error INDEPENDENT of every previous
+// chunk's. A boundary that goes badly costs that boundary and nothing after it.
+// Error is bounded by how well the latency constant is measured plus one frame
+// of release granularity, for a song of any length.
+//
+// The previous chunk is stopped explicitly, because the release now happens
+// while it is still sounding. speaker_stop() is documented ("stop any active
+// speaker playback immediately") where an overlapping speaker_play_tracks() is
+// not -- SpeakerFinishReasonPreempted is about a higher-priority system source
+// taking the output, not about an app's own second call, so relying on it to do
+// a handover would be building on an undocumented behaviour.
+//
+// The cost is real and worth stating: the last RB_MUSIC_CALL_MS of every
+// chunk is cut off and never heard. That is silence moved rather than silence
+// added -- chaining put the same gap immediately AFTER the boundary, where it
+// delayed real notes; this puts it immediately BEFORE, where it eats the tail of
+// a note that was about to be cut off by the next one anyway.
 //
 // ---------------------------------------------------------------------------
 // The finish callback RECORDS, it does not act.
 //
-// It runs in the speaker driver's own context, and everything it might want to
-// do -- speaker_play_tracks(), speaker_set_finish_callback() -- is a call back
-// into the driver that just called us. Re-entering a driver from its own
+// It may run in the speaker driver's own context, and everything it might want
+// to do -- speaker_play_tracks(), speaker_set_finish_callback() -- is a call
+// back into the driver that just called us. Re-entering a driver from its own
 // completion callback is the kind of thing that works on an emulator, whose
 // implementation is far more forgiving, and wedges or panics real firmware. This
-// app did exactly that at every chunk boundary, roughly every 8 seconds, and the
-// watch rebooted after a while.
+// app did exactly that at every chunk boundary, roughly every 16 seconds, and
+// the watch rebooted after a while.
 //
-// So the callback now only sets a flag. Every speaker call is made from the app
-// task, in audio_tick(), where blocking is safe and the current song time is
-// available directly rather than as a copy that is up to a frame stale.
+// (The SDK header now says the callback "runs on the app task". That may well be
+// true on current firmware; it was not worth re-testing, because with scheduling
+// on the song clock the callback has no work to do anyway.)
 //
-// The cost is that a handover waits for the next frame, so a chunk boundary is
-// no longer gapless. That is a real regression in continuity, and it is accepted
-// deliberately: a gap measured in one frame is not something a player can pick
-// out at a note boundary, and a reboot is.
+// Every speaker call is made from audio_tick(), on the app task, where blocking
+// is safe and the current song time is available directly rather than as a copy
+// that is up to a frame stale.
 // ---------------------------------------------------------------------------
 
 static void prv_finished(SpeakerFinishReason reason, void *ctx) {
   (void)ctx;
   if (!s_playing) {
-    return;  // our own speaker_stop(); not a chain point
+    return;  // our own speaker_stop() on the way out; nothing to report
   }
   s_finish_reason = (uint8_t)reason;
   s_finished = true;
 }
 
-// Runs on the app task, once the finish callback has flagged a boundary.
-static void prv_handle_finished(uint32_t elapsed_ms) {
-  s_finished = false;
-
-  // Anything other than a clean finish means something else has taken the
-  // speaker. Stop rather than fight for it -- a rhythm game that keeps
-  // re-grabbing the output would stutter, and audio is only an output here.
-  if (s_finish_reason != (uint8_t)SpeakerFinishReasonDone) {
-#if RB_DEBUG_LOG_AUDIO
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "music ended early, reason=%d", (int)s_finish_reason);
-#endif
-    s_playing = false;
-    speaker_set_finish_callback(NULL, NULL);
+// Point s_armed at `index`, or clear it if the song has no such chunk.
+//
+// One latency for every chunk, including the first of a song: measured across
+// three songs, a speaker call costs the same whether or not anything has sounded
+// before it. See RB_MUSIC_CALL_MS, which records the measurement and the one
+// outlier that does not fit it.
+static void prv_arm(uint16_t index) {
+  const MusicChunk *const chunk = music_chunk(s_song, index);
+  if (chunk == NULL) {
+    s_armed = false;  // past the last chunk; the song's music is done
     return;
   }
 
-  const MusicChunk *const next = music_chunk(s_song, s_next_chunk);
-  if (next == NULL) {
-    prv_play_chunk(s_next_chunk, elapsed_ms);  // ends it, clears the callback
-    return;
-  }
+  const uint32_t due_ms = prv_chunk_due_ms(chunk);
 
-  // Positive error means the chunk is not due yet, i.e. the music has run AHEAD
-  // of the notes.
-  const uint32_t due_ms = prv_chunk_due_ms(next);
-  const int32_t error_ms = (int32_t)due_ms - (int32_t)elapsed_ms;
-
-#if RB_DEBUG_LOG_AUDIO
-  // "late" is the quantity being tuned: this boundary is when the next chunk
-  // starts sounding, compared against the song time its notes were charted at.
-  // It is measured against the UNSHIFTED ideal on purpose -- comparing against
-  // due_ms would be comparing the offset with itself, which is a number that
-  // cannot be driven to zero by changing it.
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "chunk %u boundary: song=%lums late=%ldms (due=%lums)",
-          (unsigned)s_next_chunk, (unsigned long)elapsed_ms,
-          (long)((int32_t)elapsed_ms - (int32_t)(RB_MUSIC_START_MS + next->start_ms)),
-          (unsigned long)due_ms);
-#endif
-
-  if (error_ms > RB_MUSIC_RESYNC_MS) {
-    s_armed_chunk = s_next_chunk;
-    s_armed_at_ms = due_ms;
-    s_armed = true;
-    return;  // audio_tick() releases it when the song clock arrives
-  }
-
-  prv_play_chunk(s_next_chunk, elapsed_ms);
+  s_armed_chunk = index;
+  s_due_ms = due_ms;
+  s_release_at_ms = (due_ms > RB_MUSIC_CALL_MS) ? (due_ms - RB_MUSIC_CALL_MS) : 0u;
+  s_armed = true;
 }
 
-static void prv_play_chunk(uint16_t index, uint32_t elapsed_ms) {
-  const MusicChunk *const chunk = music_chunk(s_song, index);
-  if (chunk == NULL) {  // song over
-    s_playing = false;
-    speaker_set_finish_callback(NULL, NULL);
+// Hand the armed chunk to the sequencer, and arm the one after it.
+static void prv_release(uint32_t elapsed_ms) {
+  const MusicChunk *const chunk = music_chunk(s_song, s_armed_chunk);
+  if (chunk == NULL) {  // defensive; prv_arm() does not arm a missing chunk
+    s_armed = false;
     return;
   }
 
@@ -176,45 +163,82 @@ static void prv_play_chunk(uint16_t index, uint32_t elapsed_ms) {
     tracks[t].sample = NULL;  // waveform synthesis; no sample-backed track now
   }
 
-  s_next_chunk = (uint16_t)(index + 1);
+#if RB_DEBUG_LOG_AUDIO
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "release chunk %u: song=%lums due=%lums slip=%ldms",
+          (unsigned)s_armed_chunk, (unsigned long)elapsed_ms, (unsigned long)s_due_ms,
+          (long)((int32_t)elapsed_ms - (int32_t)s_release_at_ms));
+#endif
 
-  // How long this chunk should take, plus slack, in song time. Recomputed from
-  // the CURRENT clock reading rather than from where the chunk was due, so a
-  // late start does not make the watchdog trigger-happy.
-  s_deadline_ms = elapsed_ms + chunk->duration_ms + RB_MUSIC_STALL_MS;
+  // The previous chunk is still sounding -- that is the point of releasing
+  // early. Stop it rather than letting two note lists overlap.
+  if (s_playing) {
+    speaker_stop();
+  }
 
-  if (!speaker_play_tracks(tracks, count, RB_AUDIO_VOLUME)) {
+  const uint16_t index = s_armed_chunk;
+  s_content_end_ms = s_due_ms + chunk->duration_ms;
+
+  if (speaker_play_tracks(tracks, count, RB_AUDIO_VOLUME)) {
+    s_playing = true;
+  } else {
 #if RB_DEBUG_LOG_AUDIO
     APP_LOG(APP_LOG_LEVEL_DEBUG, "speaker_play_tracks failed at chunk %u", (unsigned)index);
 #endif
     // Do NOT give up on the song. Failing here used to stop the music for good,
     // which turns one bad handover into "the second half has no music" -- the
-    // whole remainder lost to a single transient. Skip to the next chunk at its
-    // scheduled time instead, so the cost is one chunk and the music comes back.
-    const MusicChunk *const next = music_chunk(s_song, s_next_chunk);
-    if (next != NULL) {
-      s_armed_chunk = s_next_chunk;
-      s_armed_at_ms = prv_chunk_due_ms(next);
-      s_armed = true;
-    } else {
-      s_playing = false;
-      speaker_set_finish_callback(NULL, NULL);
-    }
+    // whole remainder lost to a single transient. Arming the next chunk below
+    // costs one chunk instead, and unlike the old chained design there is
+    // nothing to recover: the next release was never going to depend on this
+    // call succeeding.
+    s_playing = false;
   }
+
+  prv_arm((uint16_t)(index + 1));
+  (void)elapsed_ms;
 }
 
-static void prv_begin(uint16_t index, uint32_t elapsed_ms) {
+// Runs on the app task once the finish callback has flagged something.
+//
+// Nothing is scheduled from here any more. Mid-song a chunk is always stopped
+// before its content runs out, so the only finish that should arrive naturally
+// is the last chunk of the song.
+static void prv_handle_finished(uint32_t elapsed_ms) {
+  s_finished = false;
+
+  const uint8_t reason = s_finish_reason;
+
+  if (reason == (uint8_t)SpeakerFinishReasonStopped) {
+    return;  // ours, from prv_release(); s_playing is about to be true again
+  }
+
+  if (reason == (uint8_t)SpeakerFinishReasonDone) {
 #if RB_DEBUG_LOG_AUDIO
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "begin chunk %u: song=%lums armed_at=%lums late=%ldms",
-          (unsigned)index, (unsigned long)elapsed_ms, (unsigned long)s_armed_at_ms,
-          (long)((int32_t)elapsed_ms - (int32_t)s_armed_at_ms));
-#else
-  (void)elapsed_ms;
+    // THE calibration signal. A chunk that runs to its natural end finishes this
+    // far from where its content was charted to end, and that difference is
+    // exactly (actual call latency - RB_MUSIC_CALL_MS). Positive means the
+    // constant is too small. Only the final chunk of a song reports it, because
+    // every other chunk is stopped early by design -- so it is one sample per
+    // playthrough, and worth collecting from all three songs.
+    APP_LOG(APP_LOG_LEVEL_DEBUG, "chunk done: song=%lums expected=%lums resid=%ldms",
+            (unsigned long)elapsed_ms, (unsigned long)s_content_end_ms,
+            (long)((int32_t)elapsed_ms - (int32_t)s_content_end_ms));
 #endif
+    s_playing = false;
+    if (!s_armed) {
+      speaker_set_finish_callback(NULL, NULL);  // song's music is over
+    }
+    return;
+  }
+
+  // Preempted or Error: something else has taken the speaker. Stop rather than
+  // fight for it -- a rhythm game that keeps re-grabbing the output would
+  // stutter, and audio is only an output here.
+#if RB_DEBUG_LOG_AUDIO
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "music ended early, reason=%d", (int)reason);
+#endif
+  s_playing = false;
   s_armed = false;
-  s_playing = true;
-  speaker_set_finish_callback(prv_finished, NULL);
-  prv_play_chunk(index, elapsed_ms);
+  speaker_set_finish_callback(NULL, NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,10 +247,9 @@ static void prv_begin(uint16_t index, uint32_t elapsed_ms) {
 
 void audio_init(void) {
   s_playing = false;
-  s_next_chunk = 0;
   s_armed = false;
   s_finished = false;
-  s_deadline_ms = 0;
+  s_content_end_ms = 0;
   s_song = 0;
 #if RB_DEBUG_LOG_AUDIO
   APP_LOG(APP_LOG_LEVEL_DEBUG, "music: song 0 has %u chunks, %lums",
@@ -268,18 +291,15 @@ void audio_song_start(uint8_t song, uint32_t elapsed_ms) {
     return;
   }
 
-  // Find the first chunk that has not already been passed. On a fresh song
-  // that is chunk 0; on resume it is the next boundary, and the gap until then
-  // stays silent rather than playing the wrong part of the song.
+  // Find the first chunk that has not already been passed. On a fresh song that
+  // is chunk 0; on resume it is the next boundary, and the gap until then stays
+  // silent rather than playing the wrong part of the song.
   const uint16_t count = music_chunk_count(s_song);
   uint16_t index = count;
-  uint32_t start_at_ms = 0;
   for (uint16_t i = 0; i < count; i++) {
     const MusicChunk *const chunk = music_chunk(s_song, i);
-    const uint32_t song_ms = prv_chunk_due_ms(chunk);
-    if (song_ms >= elapsed_ms) {
+    if (prv_chunk_due_ms(chunk) >= elapsed_ms) {
       index = i;
-      start_at_ms = song_ms;
       break;
     }
   }
@@ -287,11 +307,8 @@ void audio_song_start(uint8_t song, uint32_t elapsed_ms) {
     return;  // past the end of the music
   }
 
-  // start_at_ms already carries RB_MUSIC_OFFSET_MS, which is what lines the
-  // sequencer's startup behaviour up with the notes.
-  s_armed_chunk = index;
-  s_armed_at_ms = start_at_ms;
-  s_armed = true;
+  prv_arm(index);
+  speaker_set_finish_callback(prv_finished, NULL);
   audio_tick(elapsed_ms);  // already due if the song is mid-flight
 }
 
@@ -305,39 +322,25 @@ void audio_song_start(uint8_t song, uint32_t elapsed_ms) {
 // Taking the clock as a parameter rather than sampling one inside audio.c keeps
 // the dependency one-way: audio is still a pure output, and the timing loop
 // still cannot come to depend on it.
-// It is also where every speaker call is made from, including the ones a chunk
-// boundary asks for -- see the note on prv_finished().
+//
+// It is also where every speaker call is made from -- see the note on
+// prv_finished().
+//
+// There is no watchdog here any more, and its absence is the point. The old one
+// existed because the whole handover chain hung off a single finish callback, so
+// anything that swallowed that callback stopped the music permanently and
+// silently. Nothing hangs off the callback now: the next release is already
+// scheduled against the song clock before the current chunk starts sounding, so
+// a chunk that never reports finishing costs nothing at all. A watchdog that
+// forced a handover would now be the only thing capable of double-starting one.
 void audio_tick(uint32_t elapsed_ms) {
-  // Watchdog: a chunk that never reports finishing must not take the rest of the
-  // song with it.
-  //
-  // The whole handover chain hangs off one callback, so anything that swallows
-  // it stops the music permanently and silently -- no error, nothing in the log,
-  // just a song that goes quiet partway and stays quiet. That is not
-  // hypothetical: a chunk over ~32s reproducibly never reports finishing, which
-  // is why chunks are capped by duration in the generator. This is the runtime
-  // half of that defence, and it covers the cases the cap cannot predict.
-  //
-  // The deadline is the chunk's own duration plus RB_MUSIC_STALL_MS of slack, so
-  // ordinary lateness -- a resync wait, a slow frame, accumulated drift -- can
-  // never trip it. Only a chunk that has genuinely stopped can.
-  if (s_playing && !s_armed && !s_finished && elapsed_ms > s_deadline_ms) {
-#if RB_DEBUG_LOG_AUDIO
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "chunk %u never finished by %lums -- forcing handover",
-            (unsigned)(s_next_chunk - 1), (unsigned long)s_deadline_ms);
-#endif
-    speaker_stop();       // it may still be holding the output
-    s_finish_reason = (uint8_t)SpeakerFinishReasonDone;
-    s_finished = true;
-  }
-
   if (s_finished) {
     prv_handle_finished(elapsed_ms);
   }
-  if (!s_armed || elapsed_ms < s_armed_at_ms) {
+  if (!s_armed || elapsed_ms < s_release_at_ms) {
     return;
   }
-  prv_begin(s_armed_chunk, elapsed_ms);
+  prv_release(elapsed_ms);
 }
 
 void audio_song_stop(void) {
@@ -345,12 +348,12 @@ void audio_song_stop(void) {
   if (!s_playing) {
     return;
   }
-  // Cleared BEFORE stopping: speaker_stop() fires the finish callback, and a
-  // chain step from it here would restart the music we are trying to end.
+  // Cleared BEFORE stopping: speaker_stop() fires the finish callback, and
+  // prv_finished() checks this flag precisely so a stop on the way out is not
+  // mistaken for something worth reporting.
   s_playing = false;
   speaker_set_finish_callback(NULL, NULL);
   speaker_stop();
-  s_next_chunk = 0;
   // Drop any boundary the callback flagged on the way out, so the next song does
   // not start by servicing the previous one's last chunk.
   s_finished = false;

@@ -602,7 +602,8 @@ with a throwaway spike on the emulator, and two of them are sharp edges:
   because by then it is too late.
 - Chunk-to-chunk playback carries **no rate error**: consecutive 8,135 ms chunks
   came 8073/8186/8103/8193/8083 ms apart on the song clock — ±60 ms of jitter
-  about the right answer.
+  about the right answer. **This is an emulator property and the watch does the
+  opposite** — see "What the emulator does not show".
 - Restarting a chunk **cold**, after the sequencer has idled a couple of hundred
   ms, is different: it comes back ~200 ms short.
 - **A speaker call from inside the finish callback reboots the watch.** It runs
@@ -611,8 +612,8 @@ with a throwaway spike on the emulator, and two of them are sharp edges:
   not. The callback now only sets a flag and the app task does the work — see
   below.
 - The **first** `speaker_play_tracks()` call **swallows ~200 ms of the chunk it is
-  given**, rather than costing latency before it. Hence `RB_MUSIC_OFFSET_MS` —
-  and note the sign, discussed below.
+  given**, rather than costing latency before it. **Also inverted on hardware,
+  where every call costs latency up front instead.**
 - **A PCM stream cannot coexist with the sequencer.** `speaker_stream_open()`
   returns false while tracks are playing (the music itself is unharmed — it
   finishes `Done`, not `Preempted`). This is why there are no reactive hit
@@ -641,35 +642,90 @@ several beats, and unmistakably what "out of sync" meant. This is fixed in
 `clock.c`, by making real seconds authoritative; it must never be papered over
 with an audio offset.
 
-**A flat error is the offset.** What remained was a constant ~200 ms head start
-from the sequencer eating the top of the first chunk. `RB_MUSIC_OFFSET_MS`
-cancels it, and because the music runs *early* the correction starts it **later**
-— the opposite of a latency compensation. Two earlier builds got this backwards
-with a positive "latency" constant (200 ms, later re-measured as 590 ms); both
-were measuring the clock losing time, not the speaker.
+**A flat error is the offset.** On the emulator what remained was a constant
+~200 ms head start from the sequencer eating the top of the first chunk;
+`RB_MUSIC_OFFSET_MS` cancelled it, and because the music ran *early* the
+correction started it **later** — the opposite of a latency compensation. Two
+earlier builds got this backwards with a positive "latency" constant (200 ms,
+later re-measured as 590 ms); both were measuring the clock losing time, not the
+speaker.
 
 With both fixed, the mean error over a full song is **−21 ms and +25 ms** across
 two runs of the debug harness, and **+1 ms** playing the real title-screen path.
 
-There is also a re-sync guard: at a chunk boundary, if the music has run more
-than `RB_MUSIC_RESYNC_MS` ahead, the next chunk is held until the song clock
-reaches it. Chunk boundaries are the only re-sync points available, because the
-sequencer plays a note list and reports no position. The threshold is 250 ms and
-deliberately well above jitter, because **correcting is not free**: a chunk held
-back is a chunk restarted cold, which costs the ~200 ms above. At 40 ms the guard
-fired at every boundary, each correction causing the cold start that triggered
-the next — a stable limit cycle injecting ~170 ms of silence every 8 seconds.
-Chaining is the good path; this is a guard rail for a real runaway, not the
-mechanism that keeps the music in time.
+**And then a third thing turned out to exist, visible only on hardware:
+a per-call cost that chaining accumulates.** It is not a rate error and not a
+flat offset, so neither of the two homes above was right. See "What the emulator
+does not show".
 
-To re-measure any of this, set `RB_DEBUG_LOG_AUDIO` to 1 and read the `late=`
-figures, which compare when each chunk starts sounding against the song time its
-notes are charted at.
+To re-measure any of this, set `RB_DEBUG_LOG_AUDIO` to 1 and read the `resid=`
+figure logged when a chunk reaches its natural end — it is exactly
+(actual call latency − `RB_MUSIC_CALL_MS`).
 
 ### What the emulator does not show
 
-Two problems appeared only on a real watch, and both came down to the app task
-being a far scarcer resource there than on a desktop emulator.
+Three problems appeared only on a real watch. Two came down to the app task
+being a far scarcer resource there than on a desktop emulator; the third is the
+emulator's speaker behaving as the *mirror image* of the real one.
+
+**The music fell progressively behind the notes**, reported by a player as
+pressing the button and feeling the vibration well before hearing the note. The
+song clock was not at fault — it tracked wall time to 0.1% over a full song. The
+speaker was:
+
+Each chunk's wall duration ran over its nominal content length, by song:
+
+| overrun | chunk 0 | chunk 1 | chunk 2 |
+|---|---|---|---|
+| Golden | +176 ms | +158 ms | +172 ms |
+| You Are Not Alone | +167 ms | +163 ms | +179 ms |
+| Never Gonna Give You Up | *+507 ms* | +230 ms | +131 ms |
+
+Every `speaker_play_tracks()` call costs latency *before* sound appears — the
+exact inverse of the emulator, where the first call swallows content *after* it.
+It is a **fixed per-call cost of ~170 ms**, and the cross-song comparison is what
+establishes that rather than the alternatives:
+
+- **Not a playback rate.** You Are Not Alone's chunks are 16,833 ms against
+  Golden's 15,738 ms — 7% longer — yet they overrun by *less*. A rate error
+  scales with duration and would go the other way. It is also flat against note
+  count: 59 notes and 106 notes cost the same.
+- **Not a cold-start ramp.** Golden's chunk 0 was the first speaker call in a
+  freshly launched app, with nothing sounded before it, and cost 176 ms like
+  everything else.
+
+The one NGGYU run, read alone, suggested a warming amplifier (3.1% → 1.4% →
+0.8%). It was an outlier — that run was the first launch straight after an
+install — and the reading did not survive two more songs. **One song is not a
+measurement**, which is the transferable part of this.
+
+Chaining then **accumulates** it, because a chunk cannot start until the previous
+one ends and the previous one already started late. The lag went 522 → 752 → 883
+ms and could never come back: music running late cannot be fast-forwarded, since
+the note list would have to be re-emitted and there is nowhere to do that. The
+re-sync guard only ever held chunks that were *early*, so it could not help
+either.
+
+So the chain is gone. Each chunk is now released against the song clock at
+`due_ms − latency`, and the previous chunk is stopped explicitly with
+`speaker_stop()` (documented, where an overlapping `speaker_play_tracks()` is
+not — `SpeakerFinishReasonPreempted` is about a higher-priority *system* source,
+not an app's own second call). One constant covers it: `RB_MUSIC_CALL_MS`.
+
+What this buys is not a better constant but a better *error structure*: every
+chunk is anchored independently, so a bad boundary costs that boundary and
+nothing after it, for a song of any length. The price is that the last
+`RB_MUSIC_CALL_MS` of each chunk is cut off — silence moved rather than added,
+since chaining put the same gap immediately *after* the boundary where it delayed
+real notes, and this puts it immediately *before*, where it clips the tail of a
+note the next one was about to cut off anyway.
+
+Two defences became unnecessary and were removed rather than left to rot: the
+stall watchdog (`RB_MUSIC_STALL_MS`) existed because the whole handover chain hung
+off one finish callback, and nothing hangs off it now — a chunk that never reports
+finishing costs nothing, and a watchdog forcing a handover would be the only thing
+able to double-start one. The re-sync guard (`RB_MUSIC_RESYNC_MS`) was the
+mechanism for pulling back music that ran early, which is now structural.
 
 **The watch rebooted after a while.** Chunks were chained from inside the
 speaker's finish callback, which runs in the driver's own context — so every
@@ -813,12 +869,15 @@ call costs ~200 ms, and a PCM stream cannot coexist with tracks. Also:
 
 **Could not be verified, and how each is handled:**
 
-1. **Whether the sequencer's ~200 ms first-call behaviour is the same on
-   hardware.** It is compensated by a single constant (`RB_MUSIC_OFFSET_MS`)
-   measured on the emulator. If the real device differs, the whole track sits
-   uniformly early or late against the notes — audible, but a one-number fix, and
-   it cannot affect scoring, which never reads audio. A *growing* error would be
-   a different fault with a different home: see "Keeping the music on the notes".
+1. ~~**Whether the sequencer's ~200 ms first-call behaviour is the same on
+   hardware.**~~ **ANSWERED, and it was not.** This was written expecting that if
+   the device differed the track would sit "uniformly early or late — audible, but
+   a one-number fix". The first half was right and the second was wrong. Hardware
+   costs latency on *every* call, not just the first, and the old chained
+   scheduling accumulated it, so the error grew (522 → 752 → 883 ms) and no single
+   constant could cancel it. The fix was structural, not numeric: release each
+   chunk against the song clock instead of chaining. See "What the emulator does
+   not show". As predicted, it never touched scoring, which does not read audio.
 2. **Button-press latency through the firmware.** `ClickHandler` carries **no
    timestamp** (`pebble.h:5211`; the recognizer exposes only button id, click
    count and is-repeating), so the press time is sampled with `time_ms()` as the

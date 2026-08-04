@@ -188,23 +188,55 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   cannot be steered, so every millisecond the clock is wrong is a millisecond the
   music sits away from the notes.
 
-- **Keeping the music on the notes is one constant, and its sign is
-  counter-intuitive.** The chart and the music come from one MIDI and are aligned
-  *exactly* in the generated data — verified by reconstructing the music timeline
-  from `music.c` and checking that all 89 chart notes coincide with a sounding
-  note onset to 0ms. So any desync is a runtime property, and there are only two
-  possible causes. Diagnose with `RB_DEBUG_LOG_AUDIO`, which logs when each chunk
-  starts sounding against the song time its notes are charted at:
+- **The chart and the music are aligned to 0ms in the generated data**, verified
+  by reconstructing the music timeline from `music.c` and checking every chart
+  note against a sounding note onset (157/157 for song 0). So a desync is always
+  a runtime property. Diagnose with `RB_DEBUG_LOG_AUDIO`. There are now THREE
+  possible causes, not two:
   - a **growing** error is a clock rate problem — fix it in `clock.c`, never by
-    tuning the audio offset;
-  - a **flat** error is `RB_MUSIC_OFFSET_MS`.
+    tuning an audio constant;
+  - a **flat** error is `RB_MUSIC_OFFSET_MS`;
+  - an error that **steps up at every chunk boundary and never comes back** is
+    the speaker's per-call latency being accumulated. That is what the chained
+    design did on hardware, and it is why chunks are now released against the
+    song clock instead. Constant: `RB_MUSIC_CALL_MS`.
 
-  The first `speaker_play_tracks()` call **swallows ~200ms of the chunk it is
-  given** rather than costing latency before it, and chaining is seamless so
-  every later chunk inherits the head start. The correction therefore starts the
-  music *later* — the opposite of a latency compensation. Earlier builds had a
-  positive "latency" constant here (200, then re-measured as 590); both were
-  measuring the clock losing time, not the speaker.
+- **The emulator's speaker is the MIRROR IMAGE of the watch's, not a model of
+  it.** On the emulator the first `speaker_play_tracks()` call *swallows* ~200ms
+  of the chunk it is given and chaining is free, so the music runs EARLY and the
+  correction pushes it later. On a real Pebble Time 2 every call costs ~170ms of
+  latency BEFORE sound appears, so the music runs LATE and the correction pulls
+  it earlier. A constant derived from the emulator is therefore not merely
+  imprecise here, it has the wrong sign. One emery build serves both and the
+  watch wins, so **audio sync can no longer be judged from an emulator session at
+  all.**
+  - **MEASURE ON MORE THAN ONE SONG.** One song read alone said "cold amplifier
+    warming up" — its three chunks overran 3.1% / 1.4% / 0.8%, which is not a
+    shape a playback rate can take. Two more songs demolished that: all six of
+    their chunks cost 158-179ms including a chunk 0 in a freshly launched app,
+    so there is no cold-start ramp and the 507ms was an outlier (first launch
+    after an install). A plausible mechanism fitted to three points is a story,
+    not a measurement.
+  - What DOES separate a per-call cost from a playback rate is comparing songs
+    with different chunk lengths: 16833ms chunks overran by LESS than 15738ms
+    ones, where a rate error would scale with duration. Note count is flat too.
+  - Chaining ACCUMULATES a per-call cost, because a chunk cannot start until the
+    previous one ends and the previous one already started late: 522 → 752 →
+    883ms over one song, uncorrectable, since music running late cannot be
+    fast-forwarded and the old re-sync guard only held chunks that were *early*.
+  - The fix is structural, not numeric: `prv_arm()`/`prv_release()` in `audio.c`
+    schedule every chunk at `due_ms - latency` off the song clock and
+    `speaker_stop()` the previous one. Errors no longer compose — a bad boundary
+    costs that boundary only. The price is that the last `RB_MUSIC_CALL_MS`
+    of each chunk is never heard.
+  - Use `speaker_stop()` then `speaker_play_tracks()`, never an overlapping
+    `speaker_play_tracks()`. Only the former is documented;
+    `SpeakerFinishReasonPreempted` is about a higher-priority *system* source
+    taking the output, not about an app's own second call.
+  - Calibrate from the `resid=` log line, which a chunk emits at its natural end
+    and equals (actual call latency − `RB_MUSIC_CALL_MS`). Only the LAST
+    chunk of a song produces one — every other chunk is stopped early on purpose
+    — so it is one sample per playthrough.
 
 - **Never call a speaker function from the speaker's finish callback.** It runs
   in the driver's context, and `speaker_play_tracks()` / `speaker_set_finish_
@@ -212,9 +244,11 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   emulator tolerates it; real firmware does not — this app chained chunks that
   way at every boundary and **the watch rebooted after a while**. `prv_finished()`
   now only sets a flag; every speaker call is made from `audio_tick()` on the app
-  task. The cost is that a handover waits for the next frame, so a boundary is no
-  longer gapless — accepted deliberately, because a one-frame gap at a note
-  boundary is not something a player picks out and a reboot is.
+  task. The rule still holds even though the callback no longer drives anything:
+  scheduling moved to the song clock, so `prv_finished()` has no work left to do
+  and there is nothing to tempt anyone back. (The SDK header now claims the
+  callback "runs on the app task" — possibly true on current firmware, not worth
+  re-testing to find out.)
 
 - **The app task is the scarce resource on hardware, and the emulator hides it.**
   A 10ms clock tick (100 wakeups/sec) plus a 30fps full-screen redraw was fine on
@@ -251,12 +285,12 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   chosen and why; it is the only way to see this on hardware.
 
 - **A music re-sync that fires on jitter causes the problem it corrects.**
-  Chained chunks track to ±60ms, but a chunk restarted cold after the sequencer
-  has idled comes back ~200ms short. So a tight threshold fires at every
-  boundary, each correction causing the cold start that triggers the next — a
-  stable limit cycle injecting ~170ms of silence every 8 seconds. `RB_MUSIC_
-  RESYNC_MS` is a guard rail for a real runaway, not the mechanism that keeps the
-  music in time; chaining is.
+  `RB_MUSIC_RESYNC_MS` is GONE — clock-driven release made it redundant — but the
+  lesson generalises to any correction whose act of correcting is expensive. On
+  the emulator a chunk restarted cold comes back ~200ms short, so a tight
+  threshold fired at every boundary, each correction causing the cold start that
+  triggered the next: a stable limit cycle injecting ~170ms of silence every 8
+  seconds. Before adding a corrector, price the correction.
 
 - **`sleep N` in a capture script does not reliably reach a given point in the
   song**; use `RB_DEBUG_FREEZE_AT_MS` instead.
@@ -470,13 +504,17 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   duplicated onsets and one silent note. The final edge is nudged too, for a
   note starting a few ms before the section ends.
 
-- **Nothing may stop the music permanently.** The whole handover chain hangs off
-  one finish callback, so anything that swallows it silences the rest of the song
-  with no error and nothing in the log. Two defences, both in `audio.c`:
-  - a **watchdog** in `audio_tick()` forces the handover if a chunk has not
-    reported finishing `RB_MUSIC_STALL_MS` past its own duration;
-  - a failed `speaker_play_tracks()` **arms the next chunk** instead of giving
-    up, so a transient failure costs one chunk rather than the remainder.
+- **Nothing may stop the music permanently.** This used to need a watchdog
+  (`RB_MUSIC_STALL_MS`), because the whole handover chain hung off one finish
+  callback and anything that swallowed it silenced the rest of the song with no
+  error and nothing in the log. **The watchdog is gone, and removing it was part
+  of the fix, not a regression:** nothing hangs off the callback now, since the
+  next release is already scheduled against the song clock before the current
+  chunk starts sounding. A chunk that never reports finishing costs nothing, and
+  a watchdog forcing a handover would be the only thing capable of
+  double-starting one. Do not reintroduce it. The remaining defence still holds —
+  a failed `speaker_play_tracks()` leaves the next chunk armed instead of giving
+  up, so a transient failure costs one chunk rather than the remainder.
 
 - **Pick a section on mean melody pitch, and check for grace notes.** A chorus
   usually sits on top of the singer's range, so mean pitch per 8-bar block finds
