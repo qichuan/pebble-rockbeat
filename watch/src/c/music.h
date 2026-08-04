@@ -27,20 +27,37 @@
 //  * Chaining the next chunk from the finish callback costs NO measurable gap,
 //    and no rate error: consecutive 8135ms chunks came 8073/8186/8103/8193/8083ms
 //    apart on the song clock, which is +-60ms of jitter about the right answer.
-//    The music does not walk away from the notes.
-//  * Restarting a chunk COLD, after the sequencer has been left idle a couple of
-//    hundred ms, is a different matter -- it comes back ~200ms short. So chaining
-//    is the good path and should stay the normal one; see RB_MUSIC_RESYNC_MS for
-//    why a re-sync that fires too eagerly makes the problem it is correcting.
+//    ON HARDWARE THIS IS FALSE, and it is the one measurement here that mattered
+//    -- see the block below.
 //  * The FIRST speaker_play_tracks() call SWALLOWS ~200ms of the chunk it is
-//    given, rather than costing latency before it. Every later chunk then
-//    inherits that head start, so the whole song plays early without it. See
-//    RB_MUSIC_OFFSET_MS -- and note the sign, which earlier builds had backwards.
+//    given, rather than costing latency before it, so every later chunk inherits
+//    a head start and the whole song plays early. Restarting a chunk cold, after
+//    the sequencer has idled a couple of hundred ms, comes back ~200ms short for
+//    the same reason. ALSO FALSE ON HARDWARE, and inverted.
 //  * A PCM stream CANNOT coexist with the sequencer: speaker_stream_open()
 //    returns false while tracks are playing (the music itself survives -- it
 //    finishes with reason Done, not Preempted). This is why the reactive don/ka
 //    hit sounds are gone: the two audio sources are mutually exclusive, and the
 //    drums are in the music track anyway.
+//
+// MEASURED ON A REAL PEBBLE TIME 2, and the emulator is the mirror image of it:
+//
+//  * EVERY speaker_play_tracks() call costs latency BEFORE sound appears, rather
+//    than swallowing content after it: ~170ms, measured at 158-179ms across six
+//    chunks of two songs. It is a fixed per-call cost -- independent of chunk
+//    duration, of note count, and of whether anything sounded before it.
+//  * Chaining therefore ACCUMULATES that cost, because a chunk cannot start
+//    until the previous one ends and the previous one already started late. The
+//    lag reached 522/752/883ms across one song and could not come back: music
+//    running late cannot be fast-forwarded.
+//
+// So audio.c does not chain. Each chunk is released against the song clock, that
+// much before it is due, and the previous one is stopped. See RB_MUSIC_CALL_MS
+// and the scheduling block in audio.c.
+//
+// The general lesson is worth more than the numbers: the emulator's speaker is
+// not a model of the watch's, it is the OPPOSITE of it, and a timing constant
+// derived from it can be confidently wrong in the wrong direction.
 // ---------------------------------------------------------------------------
 
 #include <pebble.h>

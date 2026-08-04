@@ -4,8 +4,11 @@
 // Backing music, played by the watch's note sequencer.
 //
 // The MIDI is parsed at build time into SpeakerNote tracks (see music.h) and
-// handed to speaker_play_tracks() a chunk at a time, each chunk chained from
-// the previous one's finish callback.
+// handed to speaker_play_tracks() a chunk at a time, each chunk released
+// against the song clock a measured latency before it is due to sound. It is
+// NOT chained from the previous chunk's finish callback -- that accumulated the
+// speaker's per-call startup cost on real hardware. See the scheduling block in
+// audio.c.
 //
 // EVERY function here is fire-and-forget, and nothing in this module is ever
 // read by the timing or scoring path. That is what keeps the game immune to

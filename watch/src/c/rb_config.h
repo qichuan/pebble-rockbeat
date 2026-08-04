@@ -297,71 +297,85 @@
 // share one origin. Also gives the player a beat of runway before note one.
 #define RB_MUSIC_START_MS 2000
 
-// Shifts the whole music timeline against the song clock. Positive starts the
-// music LATER; this is the one knob for "the tune does not land on the notes".
+// How long after speaker_play_tracks() sound actually appears, plus the frame of
+// release granularity that audio_tick() adds. Each chunk is handed over this much
+// BEFORE the song time its first note is charted at, so the tone lands on the
+// note instead of behind it.
 //
-// MEASURED, with the clock in its current form: chained chunks track perfectly.
-// Consecutive boundaries came 8073/8186/8103/8193/8083ms apart against an 8135ms
-// nominal -- +-60ms of jitter and no rate error whatsoever. But the FIRST chunk
-// completes ~200ms sooner than its content should allow, so the sequencer eats
-// about that much while starting up, and because chaining is seamless every
-// later chunk inherits the head start for the rest of the song.
+// MEASURED on a real Pebble Time 2, with RB_MUSIC_OFFSET_MS at 0 and the old
+// chain-on-finish scheduling still in place. Each chunk's wall duration against
+// its nominal content length:
 //
-// The sign is worth being careful about: the music runs EARLY, so the correction
-// starts it LATER. That is the opposite of a latency compensation, and earlier
-// builds got it backwards -- there was a positive 200ms "latency" constant here,
-// later re-measured as 590ms. Both were measuring the song clock losing time to
-// its own calibration rather than anything about the speaker. With the clock
-// fixed, what is left is the speaker's genuine, and negative, startup cost.
+//                         chunk 0   chunk 1   chunk 2
+//     Golden               +176      +158      +172
+//     You Are Not Alone    +167      +163      +179
+//     Never Gonna...       +507      +230      +131
 //
-// Method, so it can be repeated: set this to 0, enable RB_DEBUG_LOG_AUDIO, and
-// read the "late=" figures, which compare when each chunk starts sounding
-// against the song time its notes are charted at. Take the mean. A flat error is
-// a constant offset and belongs here; a GROWING one is a rate problem and
-// belongs in clock.c -- do not paper over the second with this.
+// It is a FIXED PER-CALL COST, not a playback rate and not a cold-start ramp.
+// Both alternatives were considered and the data rules them out:
+//   - Not a rate: YANA's chunks are 16833ms against Golden's 15738ms, 7% longer,
+//     yet YANA overruns by LESS (167 vs 176). A rate error scales with duration
+//     and would go the other way. It is also independent of note count -- 59
+//     notes and 106 notes cost the same.
+//   - Not a cold start: Golden's chunk 0 was the first speaker call in a freshly
+//     launched app (8.7s of title screen, nothing sounded before it) and cost
+//     176ms, the same as every other call.
 //
-// At 200 the mean lateness over two runs was -21ms and +25ms, with a single
-// reproducible +151ms outlier at one boundary. Chasing below ~50ms would be
-// fitting to emulator noise: per-chunk jitter alone is +-60ms.
+// So ONE constant, not one for the first call and one for the rest, and it is
+// the measured mean DIRECTLY -- 169 over the six clean samples, rounded to 170.
 //
-// This is an emulator figure. If the music sits consistently ahead of or behind
-// the notes on real hardware, this is the number to re-measure, and the only one.
-#define RB_MUSIC_OFFSET_MS 200
+// That the mean transfers with no correction is worth showing, because it looks
+// like it should need one. Each measured overrun is (call latency + one frame of
+// quantisation): the old design noticed the finish on the next frame after the
+// callback. Each release now costs (call latency + one frame of quantisation)
+// too: audio_tick() fires at the first frame at or after the release time. Same
+// 40ms loop, same distribution, opposite sides of the subtraction -- so they
+// cancel and CALL_MS is the raw mean rather than the latency alone.
+//
+// Residual is then about +-30ms about the note, one frame of jitter either way,
+// and it does NOT accumulate across the song.
+//
+// THE 507 IS AN OUTLIER, and the only unexplained number here -- that run was
+// the first launch immediately after installing. If the opening of a song ever
+// sounds much later than the rest, it is the thing to re-measure; do not grow
+// this constant to cover it, because that would put every other chunk early.
+//
+// The emulator does the MIRROR IMAGE of this and that is why it went unnoticed
+// for so long: there the first call SWALLOWS ~200ms of the chunk it is given and
+// chaining is free, so the music ran early and the correction had to push it
+// later. On hardware every call costs time up front and the correction has to
+// pull it earlier. One emery build serves both -- there is no compile-time way
+// to tell an emulator from a watch -- so THE WATCH WINS AND THE EMULATOR IS NOW
+// KNOWN-WRONG BY ROUGHLY THIS AMOUNT. Do not "fix" audio sync from an emulator
+// session; it can no longer answer that question.
+#define RB_MUSIC_CALL_MS 170
 
-// Slack on top of a chunk's own duration before the watchdog in audio_tick()
-// decides the sequencer has stopped and forces the handover itself.
+// Residual trim on the whole music timeline. Positive starts the music LATER.
 //
-// Generous on purpose. Everything that legitimately makes a chunk finish late --
-// a resync wait, a slow frame at the release, accumulated drift -- is in the
-// hundreds of ms, and boundary error was measured swinging by ~900ms on a single
-// bad emulator run. Firing on any of those would cut a chunk short for no
-// reason. 3000 is far outside all of it and still turns a permanent silence into
-// one late chunk.
-#define RB_MUSIC_STALL_MS 3000
-
-// How far the music may run AHEAD of the song clock before a chunk boundary is
-// used to pull it back. Below this the next chunk is chained immediately, which
-// is gapless; above it the chunk is held until the song clock reaches its start.
+// This used to carry the platform's startup behaviour and was the only knob;
+// that job now belongs to RB_MUSIC_CALL_MS above, which is why this is 0. What
+// is left is a place to take out a flat error that survives it.
 //
-// The music cannot correct itself WITHIN a chunk -- the sequencer plays a note
-// list and reports no position -- so chunk boundaries are the only re-sync
-// points there are, roughly one every 8 seconds.
+// Method, so it can be repeated: enable RB_DEBUG_LOG_AUDIO and read the
+// "resid=" figure logged when a chunk reaches its natural end. It is exactly
+// (actual call latency - RB_MUSIC_CALL_MS), so positive means CALL_MS is too
+// small. Only the last chunk of a song reports it -- every other chunk is
+// deliberately stopped early -- so it is one sample per playthrough and worth
+// collecting from all three songs.
 //
-// This is deliberately well above the jitter it is meant to ignore, because
-// correcting is NOT free. MEASURED: a chunk chained immediately consumes its
-// nominal duration to within +-60ms, but a chunk started cold, after the
-// sequencer has been left idle for a couple of hundred ms, comes back ~200ms
-// short -- the same startup loss RB_MUSIC_OFFSET_MS exists to cancel.
+// Which constant to move:
+//   - every chunk is out by the same amount -> RB_MUSIC_CALL_MS
+//   - a flat error survives fixing that     -> here
+//   - only the OPENING of a song is out     -> neither; see the 507ms outlier
+//     noted above, which is the only evidence a first call differs at all
+//   - the error GROWS across the song       -> neither; that is a rate problem
+//     and belongs in clock.c. Never paper over it with this.
 //
-// A threshold tight enough to fire on ordinary jitter is therefore self-
-// defeating: it fires at every boundary, each correction causes the cold start
-// that causes the next one, and the result is a stable limit cycle that injects
-// ~170ms of silence every 8 seconds. 40ms did exactly that here.
-//
-// 250ms sits above jitter and below anything a player would hear as out of time
-// (a beat is 508ms at 118 BPM). Chaining stays the normal path; this is a guard
-// rail for a real runaway, not the mechanism that keeps the music in time.
-#define RB_MUSIC_RESYNC_MS 250
+// That last case is not hypothetical: it is what the chained design produced
+// (522/752/883ms and climbing), and it is what releasing on the song clock
+// removes. Each chunk is now anchored independently, so a growing error would
+// mean something genuinely new.
+#define RB_MUSIC_OFFSET_MS 0
 
 // ---------------------------------------------------------------------------
 // Persistence
