@@ -2,6 +2,10 @@
 
 ## XX.XX.XX - 20XX-XX-XX
 
+
+## 1.3 - 2026-0804
+- Fixed music drifiting issue
+
 ## 1.2 - 2026-08-01
 - Show both of the bottom lane's buttons on its target, as a SELECT bar above a
   DOWN arrow, instead of a right arrow that named neither
