@@ -71,7 +71,7 @@ def write_vlq(value: int) -> bytes:
 
 
 def build_track(melody: list[MidiNote], tempos: list[tuple[int, int]],
-                program: int | None) -> bytes:
+                program: int | None, time_sigs: list[tuple[int, int]]) -> bytes:
     """Serialise one MTrk chunk holding the tempo map and the melody.
 
     Absolute tick positions are PRESERVED rather than re-zeroed to the first
@@ -82,6 +82,16 @@ def build_track(melody: list[MidiNote], tempos: list[tuple[int, int]],
 
     for tick, tempo in tempos:
         events.append((tick, 0, b"\xFF\x51\x03" + tempo.to_bytes(3, "big")))
+
+    # The metre is carried across, in x/4. Two things need it: make_chart.py
+    # checks the metre it was told against the one the music declares, and a DAW
+    # opening this file to audition the extraction would otherwise bar a waltz in
+    # four. Only the numerator survives -- the melody is on quarter-note beats by
+    # the time it is written, so 6/8 comes back out as 3/4, which is the same
+    # bar length and the same downbeats.
+    for tick, beats in time_sigs:
+        if beats:
+            events.append((tick, 0, b"\xFF\x58\x04" + bytes([beats, 2, 24, 8])))
     if program is not None:
         events.append((0, 0, bytes([0xC0 | OUT_CHANNEL, program & 0x7F])))
 
@@ -107,7 +117,8 @@ def build_track(melody: list[MidiNote], tempos: list[tuple[int, int]],
     return b"MTrk" + struct.pack(">I", len(body)) + bytes(body)
 
 
-def resample(melody: list[MidiNote], tempos: list[tuple[int, int]], division: int):
+def resample(melody: list[MidiNote], tempos: list[tuple[int, int]],
+             time_sigs: list[tuple[int, int]], division: int):
     """Rewrite tick positions onto the TICKS_PER_BEAT_REQUIRED grid.
 
     Every melody file this tool writes uses one division, so make_chart.py only
@@ -127,7 +138,7 @@ def resample(melody: list[MidiNote], tempos: list[tuple[int, int]], division: in
     does bar arithmetic downstream.
     """
     if division == TICKS_PER_BEAT_REQUIRED:
-        return melody, tempos
+        return melody, tempos, time_sigs
 
     def scale(tick: int) -> int:
         return (tick * TICKS_PER_BEAT_REQUIRED + division // 2) // division
@@ -135,7 +146,8 @@ def resample(melody: list[MidiNote], tempos: list[tuple[int, int]], division: in
     scaled = [MidiNote(scale(n.start), max(scale(n.end), scale(n.start) + 1),
                        n.channel, n.pitch, n.velocity)
               for n in melody]
-    return scaled, [(scale(tick), tempo) for tick, tempo in tempos]
+    return (scaled, [(scale(tick), tempo) for tick, tempo in tempos],
+            [(scale(tick), beats) for tick, beats in time_sigs])
 
 
 def write_midi(path: Path, division: int, track: bytes) -> None:
@@ -151,7 +163,7 @@ def main() -> None:
     if not source.exists():
         sys.exit(f"{source} not found -- pass the source arrangement as an argument")
 
-    division, tempos, notes, programs = parse_midi(source)
+    division, tempos, notes, programs, time_sigs = parse_midi(source)
     tick_to_ms = make_tick_to_ms(tempos, division)
 
     # Channel choice and extraction both span the WHOLE file: this tool is a
@@ -161,7 +173,7 @@ def main() -> None:
     # to the file this tool produces.
     last = max((n.end for n in notes), default=0)
     bars = max(1, -(-(last + 1) // (384 * 4)))
-    whole = Song(source.stem, "whole", source, 0, bars)
+    whole = Song(source.stem, "", "whole", source, 0, bars)
     channel = pick_melody_channel(notes, programs, tick_to_ms, whole)
     # `division` is this file's own ticks-per-beat, and extraction happens BEFORE
     # resampling, so it has to be passed -- the default is the post-resample grid.
@@ -174,12 +186,15 @@ def main() -> None:
     # and report the duration inflated by exactly the resampling ratio.
     span = (tick_to_ms(melody[-1].end) - tick_to_ms(melody[0].start)) / 1000.0
 
-    melody, out_tempos = resample(melody, tempos, division)
-    track = build_track(melody, out_tempos, programs.get(channel))
+    melody, out_tempos, out_time_sigs = resample(melody, tempos, time_sigs, division)
+    track = build_track(melody, out_tempos, programs.get(channel), out_time_sigs)
     write_midi(out, TICKS_PER_BEAT_REQUIRED, track)
     pitches = [n.pitch for n in melody]
     print(f"{source.name}: {len(notes)} notes, channels "
           f"{sorted({n.channel for n in notes})}")
+    metres = sorted({beats for _tick, beats in out_time_sigs})
+    print(f"metre:  {metres or 'not declared'} beats per bar"
+          f"{' -- CHANGES, so no single beats_per_bar is right' if len(metres) > 1 else ''}")
     print(f"melody: channel {channel} (GM program {programs.get(channel)}), "
           f"{len(melody)} notes over {span:.1f}s, pitch {min(pitches)}-{max(pitches)}")
     print(f"wrote {out} ({out.stat().st_size} bytes, format 0, channel {OUT_CHANNEL}, "

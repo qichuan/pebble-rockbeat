@@ -51,6 +51,9 @@ TICKS_PER_BEAT_REQUIRED = 384
 # above. See extract_melody().
 def min_onset_ticks(ticks_per_beat: int) -> int:
     return max(1, ticks_per_beat // 8)
+# The default metre. A song in anything else carries its own `beats_per_bar`;
+# see Song below. Everything downstream measures a "bar" in this many beats --
+# the section, the downbeat accents, and the chunk boundaries.
 BEATS_PER_BAR = 4
 LEAD_MS = 2000
 TAIL_MS = 2500
@@ -69,6 +72,18 @@ class Song:
     full arrangement instead produces byte-identical output -- the extraction
     below is idempotent on an already-extracted line -- but the melody file is
     the one that can be auditioned, so it is the one that is kept.
+
+    `beats_per_bar` is the song's metre, and it is load-bearing rather than
+    decorative: a bar is the unit of the section, of the downbeat accent in
+    build_chart(), and of the chunk boundaries in build_music(). Leaving it at
+    4 for the 3/4 waltz would accent every fourth beat of a three-beat bar --
+    an accent that walks around the bar and lands on the downbeat one time in
+    three -- and would make `start_bar` count something that is not a bar of
+    the music.
+
+    One value per song only works while the file's metre does not change, so
+    build_song() checks it against the source's own time signatures rather
+    than trusting it.
     """
     title: str          # shown on the title screen; keep it short enough to fit
     artist: str         # shown under the title in the gameplay song band
@@ -76,14 +91,19 @@ class Song:
     midi: Path
     start_bar: int
     bars: int
+    beats_per_bar: int = BEATS_PER_BAR
+
+    @property
+    def bar_ticks(self) -> int:
+        return self.beats_per_bar * TICKS_PER_BEAT_REQUIRED
 
     @property
     def start_tick(self) -> int:
-        return self.start_bar * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+        return self.start_bar * self.bar_ticks
 
     @property
     def end_tick(self) -> int:
-        return self.start_tick + self.bars * BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+        return self.start_tick + self.bars * self.bar_ticks
 
 
 SONGS = (
@@ -114,6 +134,35 @@ SONGS = (
     # were collapsed, and which then cleared the same-lane floor by 1ms. This one
     # clears it by 241ms and places every note on its pitch lane.
     Song("Golden", "HUNTR/X", "golden", DATA / "golden.mid", 11, 28),
+
+    # 117 BPM. Bar 81 is 2:46: the bridge, the key change at bar 98 (3:05) and
+    # the final chorus, ending before the outro.
+    #
+    # NOT the first chorus (bar 27), and the reason is worth keeping. Bars 41-46
+    # of this arrangement are written at velocity 63 against 89-127 either side,
+    # which is a gap wide enough for melody_velocity_floor() to read as an
+    # accompaniment voice and drop -- so every section spanning them has a 14.6s
+    # hole in it where the tune simply stops. The heuristic is right in general
+    # and this file is the exception it cannot see; moving the section is the
+    # cheaper answer than weakening it. Measured over this window: 80% sounding,
+    # worst silence 1.5s, against 64% and 14.6s for the first chorus.
+    Song("Love Story", "TAYLOR SWIFT", "love", DATA / "love-story.mid", 81, 28),
+
+    # 98 BPM and the first song here in 3/4 -- see Song.beats_per_bar. 35 waltz
+    # bars is 63.8s, longer than the others, because that is where the music
+    # ends: the theme is stated twice and bar 35 is the modulation out of it.
+    # Cutting at ~57s instead would stop 3 bars short of the second statement's
+    # climax, which is the one thing in the piece everybody waits for.
+    #
+    # This is the SECOND arrangement of it. The first put both hands on one
+    # channel at one velocity, so skyline read the waltz bass between the melody
+    # notes as melody: 17% of the extracted line sat more than a seventh below
+    # its own median, and 32% of its intervals were an octave or more, against
+    # 1% for a clean line. Nothing in the pipeline could have separated them --
+    # there was no velocity gap to find. This one is a single monophonic flute
+    # part, which needs no separating.
+    Song("Merry-Go-Round of Life", "JOE HISAISHI", "mgr",
+         DATA / "merry-go-round.mid", 0, 35, beats_per_bar=3),
 )
 
 
@@ -165,6 +214,24 @@ SAME_LANE_MIN_MS = 250
 # The margin is relative for a reason: see the note in build_chart().
 BIG_VELOCITY_MARGIN = 8
 BIG_HELD_MS = 700
+
+# Share of intervals that may be an octave or wider before the extracted line is
+# reported as probably not a melody.
+#
+# Skyline takes the highest sounding note, which is the melody only while the
+# melody IS the top voice. A piano arrangement with both hands on one channel at
+# one velocity breaks that: wherever the right hand rests, the waltz bass becomes
+# the highest note and is charted as though it were the tune. There is nothing
+# for melody_velocity_floor() to find -- no velocity gap exists -- so nothing
+# else in this pipeline notices, and the chart is perfectly valid.
+#
+# What separates the two cases is the CONTOUR. A melody moves in steps and small
+# leaps; a line that alternates between a tune and the bass under it jumps an
+# octave or more every few notes. Measured on the four arrangements that ship:
+# 0.0%, 0.0%, 1.3%, 4.7% and 8.3%. The first arrangement of "Merry-Go-Round of
+# Life", which was tune-and-bass interleaved, measured 32%. The gap between those
+# two populations is wide enough that any threshold in between works.
+SKYLINE_LEAP_WARN_PCT = 20
 
 # Two chart notes closer than this are reported, loudly, at generation time.
 #
@@ -340,7 +407,16 @@ def read_vlq(data: bytes, pos: int) -> tuple[int, int]:
             return value, pos
 
 
-def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote], dict[int, int]]:
+def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote],
+                                   dict[int, int], list[tuple[int, int]]]:
+    """Read one SMF: (division, tempo map, notes, programs, metre map).
+
+    The metre map is (tick, beats per bar), a beat being a quarter note --
+    3/4 gives 3 and 6/8 gives 3, which is what the bar arithmetic downstream
+    counts in. It is kept because Song.beats_per_bar has to be checked against
+    something; an unchecked metre is a silent wrong answer, since a 3/4 file
+    read as 4/4 produces a chart that is valid and accented off the beat.
+    """
     data = path.read_bytes()
     if data[:4] != b"MThd" or len(data) < 14:
         raise ValueError(f"{path} is not a Standard MIDI file")
@@ -355,6 +431,7 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote], 
 
     pos = 8 + header_len
     tempos = [(0, 500000)]
+    time_sigs: list[tuple[int, int]] = []
     notes: list[MidiNote] = []
     programs: dict[int, int] = {}
     for _ in range(tracks):
@@ -387,6 +464,10 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote], 
                 cursor += length
                 if kind == 0x51 and len(payload) == 3:
                     tempos.append((tick, int.from_bytes(payload, "big")))
+                if kind == 0x58 and len(payload) >= 2:
+                    # numerator/2**denominator, expressed in quarter notes.
+                    beats = payload[0] * 4 / (2 ** payload[1])
+                    time_sigs.append((tick, int(beats) if beats == int(beats) else 0))
                 continue
             if status in (0xF0, 0xF7):
                 length, cursor = read_vlq(track, cursor)
@@ -418,7 +499,8 @@ def parse_midi(path: Path) -> tuple[int, list[tuple[int, int]], list[MidiNote], 
             compact_tempos[-1] = (tick, tempo)
         else:
             compact_tempos.append((tick, tempo))
-    return division, compact_tempos, sorted(notes, key=lambda note: note.start), programs
+    return (division, compact_tempos, sorted(notes, key=lambda note: note.start),
+            programs, sorted(set(time_sigs)))
 
 
 def make_tick_to_ms(tempos: list[tuple[int, int]], ticks_per_beat: int):
@@ -664,7 +746,7 @@ def build_chart(melody: list[MidiNote], tick_to_ms, song: Song):
         time_ms = LEAD_MS + int(round(tick_to_ms(note.start) - origin))
         offset = note.start - song.start_tick
         held = tick_to_ms(note.end) - tick_to_ms(note.start)
-        big = int(offset % (TICKS_PER_BEAT_REQUIRED * BEATS_PER_BAR) == 0
+        big = int(offset % song.bar_ticks == 0
                   or note.velocity >= accent_velocity
                   or held >= BIG_HELD_MS)
 
@@ -706,7 +788,7 @@ def build_music(melody: list[MidiNote], shift: int, tick_to_ms, song: Song):
     origin = tick_to_ms(song.start_tick)
     total_ms = int(round(tick_to_ms(song.end_tick) - origin))
     gain = velocity_gain(melody)
-    bar_ticks = BEATS_PER_BAR * TICKS_PER_BEAT_REQUIRED
+    bar_ticks = song.bar_ticks
 
     placed: list[tuple[int, int, int, int]] = []
     for note in melody:
@@ -922,7 +1004,7 @@ bool chart_load_from_resource(uint32_t resource_id, Chart *out_chart) {
 
 def build_song(song: Song):
     """Everything for one song: melody, chart, music, and a printed report."""
-    ticks_per_beat, tempos, notes, programs = parse_midi(song.midi)
+    ticks_per_beat, tempos, notes, programs, time_sigs = parse_midi(song.midi)
     # Every bar boundary below is computed as a fixed number of ticks, so the
     # grid has to be the one the section constants were written against.
     # tools/extract_melody.py normalises whatever the source used, which is why
@@ -932,6 +1014,19 @@ def build_song(song: Song):
                          f"ticks/beat, got {ticks_per_beat} -- re-run "
                          f"tools/extract_melody.py on it")
     tick_to_ms = make_tick_to_ms(tempos, ticks_per_beat)
+
+    # The metre is declared per song, so it is checked rather than trusted: a
+    # 3/4 file read as 4/4 charts perfectly well and accents the wrong beat,
+    # which is the kind of wrong that ships. Files written before
+    # tools/extract_melody.py carried the metre across declare nothing, and are
+    # left to the default -- absence is not disagreement.
+    declared = {beats for _tick, beats in time_sigs}
+    if declared and declared != {song.beats_per_bar}:
+        raise ValueError(
+            f"{song.title}: beats_per_bar is {song.beats_per_bar} but "
+            f"{song.midi.name} declares {sorted(declared)} -- a section, an accent "
+            f"and a chunk boundary are all measured in bars, so they would all be "
+            f"placed off the music")
 
     channel = pick_melody_channel(notes, programs, tick_to_ms, song)
     melody = extract_melody(notes, channel, song.start_tick, song.end_tick)
@@ -998,6 +1093,13 @@ def build_song(song: Song):
             print(f"          note: {len(pinned)}/{len(emitted)} notes lifted to "
                   f"the velocity floor, scattered (longest run {longest_run}) -- "
                   f"phrasing, not a fade")
+    # Contour, as a check on the extraction itself rather than on the section.
+    leaps = [abs(b.pitch - a.pitch) for a, b in zip(melody, melody[1:])]
+    wide = sum(1 for leap in leaps if leap >= 12) * 100 // max(len(leaps), 1)
+    if wide >= SKYLINE_LEAP_WARN_PCT:
+        print(f"          WARNING: {wide}% of intervals are an octave or wider -- "
+              f"skyline is probably interleaving the tune with the part under it. "
+              f"Check the arrangement before the section")
     print(f"  chart:  {len(chart)} notes ({len(chart) / duration_s:.2f}/s) -- "
           f"every melody note, 1:1")
     print(f"          lanes {LANE_NAMES[0]}={per_lane[0]} {LANE_NAMES[1]}={per_lane[1]}, "

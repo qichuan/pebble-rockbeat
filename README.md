@@ -36,8 +36,11 @@ and combo counter.
 
 ## Requirements
 
-- **emery** — Pebble Time 2, 200x228, 64 colours. This is the only target
-  platform; see "Platform" below.
+- **emery** — Pebble Time 2, 200x228, 64 colours.
+- **flint** — Pebble 2 Duo, 144x168, 2 colours.
+
+  These are the two platforms with a speaker, which is the whole reason they are
+  the two; see "Platform" below.
 - Pebble SDK 4.17 with pebble-tool 5.0.39 or newer.
 
 Verify the toolchain with:
@@ -53,13 +56,17 @@ All `pebble` commands must be run from `watch/` — the tool fails elsewhere.
 ```bash
 cd watch
 
-pebble build                              # builds for emery
+pebble build                              # builds BOTH emery and flint
 pebble install --emulator emery           # launches the emulator and installs
+pebble install --emulator flint           # the same build, other screen
 
 pebble screenshot --emulator emery --no-open shot.png
 pebble logs --emulator emery
 pebble kill                               # stop the emulator
 ```
+
+One `pebble build` produces both platforms, and a change to `render.c` has to be
+checked on both — `pebble install` targets one emulator at a time.
 
 `pebble clean` is required after editing `package.json`.
 
@@ -77,7 +84,7 @@ The judgment windows, scoring and combo logic are unit-tested on the host, with
 no emulator involved:
 
 ```bash
-./tools/run_tests.sh      # expect: OK: 3484 checks passed
+./tools/run_tests.sh      # expect: OK: 4376 checks passed
 ```
 
 This works because `game.c` and `chart.c` do not include `<pebble.h>` — they are
@@ -192,6 +199,9 @@ pebble-rockbeat/
     resources/data/
       melody.mid              song 1's melody -- chart AND music (not bundled)
       you-are-not-alone.mid   song 2's melody (not bundled)
+      golden.mid              song 3's melody (not bundled)
+      love-story.mid          song 4's melody (not bundled)
+      merry-go-round.mid      song 5's melody, 3/4 (not bundled)
   tools/make_chart.py     regenerates chart.c AND music.c for EVERY song
   tools/extract_melody.py writes a melody .mid from a full arrangement
   tools/pngkit.py         a supersampling RGBA canvas + PNG writer, stdlib only
@@ -340,20 +350,35 @@ and survives as a defensive default and as feedback.c's "nothing hit yet" mark.
 
 ## The songs
 
-Three songs, chosen with UP/DOWN on the title screen. Each is generated from one
-MIDI file — nothing is hand-placed, and there is no audio recording anywhere in
-the project.
+Five songs, chosen with UP/DOWN on the title screen (the list scrolls). Each is
+generated from one MIDI file — nothing is hand-placed, and there is no audio
+recording anywhere in the project.
 
 | | tempo | section | chart |
 |---|---|---|---|
 | **Never Gonna Give You Up** | 118 BPM | bars 12–40 | 157 notes, 2.76/s |
 | **You Are Not Alone** | 59 BPM | bars 30–44 | 74 notes, 1.30/s |
 | **Golden** | 93 BPM | bars 11–39 (from 0:25) | 146 notes, 2.65/s |
+| **Love Story** | 117 BPM | bars 81–109 (from 2:46) | 135 notes, 2.35/s |
+| **Merry-Go-Round of Life** | 98 BPM, 3/4 | bars 0–35 | 87 notes, 1.36/s |
 
-All three run ~55–57 seconds, which at these tempos means anywhere from 14 to 28
-bars. "Golden" starts at 0:25. Its chorus line repeats, so that lands on the
+Four of them run ~55–57 seconds, which at these tempos means anywhere from 14 to
+28 bars. "Golden" starts at 0:25. Its chorus line repeats, so that lands on the
 moving part of the phrase rather than its head — a musical choice, since every
 technical measure is identical across the neighbouring bars.
+
+"Merry-Go-Round of Life" is the exception at 63.8 seconds, and the extra bars are
+the point: it states its theme twice and then modulates, so 35 waltz bars is
+where the music ends. Stopping at ~57s would have cut three bars before the
+second statement's climax.
+
+It is also the first song here that is not in 4/4, which is why `Song` carries a
+`beats_per_bar`. A bar is the unit of three separate things — the section, the
+downbeat accent, and the chunk boundary — so reading a waltz as 4/4 does not
+fail, it just accents every fourth beat of a three-beat bar and calls something
+a bar that is not one. The metre is now written into the melody `.mid` by
+`extract_melody.py` and checked against the declared value at generation time,
+because an unchecked metre is exactly the kind of wrong that ships.
 
 Four things decide a section, and only one of them is mechanical. Each of the
 others cost a real bug:
@@ -374,6 +399,29 @@ hit with no sound behind them — the chart is built from note positions and nev
 looks at velocity, so nothing objected. The section now ends two bars clear of
 the fade, `MELODY_MIN_VELOCITY` floors what is emitted as a backstop, and the
 generator prints each melody's velocity range and warns on faint notes.
+
+**Two more failure modes, both found while adding songs 4 and 5.**
+
+*The velocity split can eat a quiet passage of the tune.* `melody_velocity_floor()`
+drops notes below a wide gap in the velocity values, which is what separates a
+melody from an accompaniment written on its own channel. "Love Story" has bars
+41–46 written at velocity 63 against 89–127 either side — a soft phrase, not
+another voice — and every section spanning them therefore has a **14.6-second
+hole** where the tune simply stops. The heuristic is right in general and cannot
+see the difference; moving the section (to the bridge and final chorus, bar 81)
+was much cheaper than weakening it. The tell is in the section survey: sounding
+80% with a 1.5s worst silence, against 64% and 14.6s.
+
+*Skyline is only the melody while the melody is the top voice.* The first
+arrangement of "Merry-Go-Round of Life" put both hands on one channel at one
+velocity, so wherever the right hand rested the waltz bass became the highest
+sounding note and was charted as the tune. Nothing could separate them — there
+was no velocity gap to find — and the resulting chart was perfectly valid. What
+gives it away is the **contour**: 32% of that line's intervals were an octave or
+wider, where the five arrangements that ship measure 0–8%. The generator now
+prints that share and warns over 20%. The fix was a different arrangement — a
+single monophonic flute part — which is the general lesson: when a song fights
+the constraints, change the arrangement before the constraints.
 
 "I Want It That Way" is the one where the first two collided. Most of its windows chart
 fine but contain **grace notes as little as 50 ms apart** — an ornament, not a
@@ -497,6 +545,15 @@ It is written as **format 0 on channel 0**, the convention most melody tooling
 Absolute tick positions are preserved rather than re-based to the first note,
 because `make_chart.py` selects its 28-bar section by absolute tick — re-basing
 would silently shift which part of the song gets charted.
+
+The **time signatures come across too**, in x/4. Two things need them:
+`make_chart.py` checks the `beats_per_bar` it was told against the metre the
+music declares, and a DAW opening the file to audition the extraction would
+otherwise bar a waltz in four. A file that declares nothing — the three melodies
+written before this — is left to the 4/4 default, since absence is not
+disagreement. A file whose metre *changes* is rejected outright: no single
+`beats_per_bar` is right for it, and the section, the accents and the chunk
+boundaries would all be measured against something the music does not do.
 
 That writes **both** `watch/src/c/chart.c` and `watch/src/c/music.c` from the
 same tempo map, so the notes and the music cannot drift apart. Both are generated
@@ -792,17 +849,140 @@ raising it further — going over the 256 cap does not fail, it **faults**.
 
 ## Platform
 
-`emery` only. Two reasons beyond it being the stated target:
+`emery` and `flint`, and the list is not a preference — it is **exactly the set
+of Pebbles with a speaker**:
 
-- Gabbro (Round 2) would need a different layout — three horizontal lanes on a
-  260x260 round screen get clipped by the bezel.
-- The SDK's own manifest schema
-  (`sdk-core/pebble/common/tools/schemas/attributes.json`) lists only
-  `aplite, basalt, chalk, diorite, emery, flint` as legal `targetPlatforms`
-  values. `gabbro` is absent from it.
+| | emery | flint | everything else |
+|---|---|---|---|
+| Product | Pebble Time 2 | Pebble 2 Duo | |
+| Screen | 200x228 | 144x168 | |
+| Colours | 64 | **2** | |
+| App RAM | 128 KB | 64 KB | |
+| Speaker | yes | yes | **no** |
 
-All geometry is still derived from `layer_get_bounds()` at draw time, so nothing
-hardcodes 200x228 and a second platform would be a layout pass, not a rewrite.
+The game is one melody line played through `speaker_play_tracks()`, so a watch
+without a speaker gets a rhythm game with no rhythm. `PBL_SPEAKER` is defined
+for emery and flint and for nothing else
+(`sdk-core/pebble/common/tools/pebble_sdk_platform.py`), and the vendor's own
+[hardware table](https://developer.repebble.com/guides/tools-and-resources/hardware-information/)
+agrees. That single fact decides the target list.
+
+**Gabbro (Pebble Round 2) was dropped, and having no speaker is the reason** —
+not the layout. The layout argument that used to sit here (three lanes clipped
+by a 260x260 bezel) was answering the wrong question: a round screen is a
+layout pass, and this port did a layout pass for flint. A missing speaker is
+not something a layout pass fixes. Gabbro is also absent from the SDK's
+manifest schema (`schemas/attributes.json`), so it could not be named in
+`targetPlatforms` even if it were wanted.
+
+### What supporting a second screen actually cost
+
+Not a rewrite, but not free either, and **not what the previous version of this
+section predicted**. It claimed all geometry was derived from
+`layer_get_bounds()` at draw time — that had stopped being true: the layout is
+absolute, on purpose, because it was composed at 200x228 for that screen (see
+`rb_config.h`). Only the width is still read from bounds.
+
+So flint got its own block of layout constants rather than a scale factor. It
+is 56px narrower and **60px shorter**, and 60px is more than a whole lane, so
+nothing about emery's vertical budget survives division. Three things had to be
+decided rather than computed:
+
+- **Note speed.** 95px/s, not emery's 120. Speed is a legibility constraint:
+  the tightest same-lane pair is an eighth (254ms) and it has to be further
+  apart than one note is wide, which at flint's 22px note diameter puts the
+  floor near 87px/s. Going faster to "match" emery would leave only 1.1s of
+  music on screen.
+- **Three song rows instead of four.** A fourth row would have to come out of
+  the header or the control hints, and a hint the player cannot read costs more
+  than a song they have to scroll to.
+- **One line of judgment counts instead of three** on the results screen. This
+  is the only place the two platforms show a different *shape*; the numbers are
+  the same.
+
+### Long titles scroll, and the list says where you are
+
+Two small things the 144px screen forced, both of which also improved emery.
+
+**A title too long for its row scrolls through it.** The carousel steps by
+**character**, not by pixel, and that is worth explaining because it looks like
+a shortcut and is not. Smooth pixel scrolling requires the text to be *clipped*
+to its box. The SDK exposes no clip-box call — only `layer_set_clips`, which
+applies to a whole layer — and this app draws everything into one canvas on
+purpose. Letting the text overhang would mean repainting the panel border, the
+panel interior and the lane bands behind it on every frame it overhung.
+Advancing the *start* of the string cannot overhang at all: it is one pointer
+offset, and the text is always drawn inside its box.
+
+Details that matter more than they look:
+
+- Steps land on character boundaries, not bytes, so a multi-byte title can
+  never be cut in half mid-scroll.
+- The scan that decides how far a title must travel costs one text measurement
+  per character, so it is cached on the string pointer — titles are string
+  literals, so the pointer is a stable identity for the string.
+- Only the **selected** row scrolls. Four titles moving at once in a menu being
+  read is noise.
+- The position is derived from a clock, never from a per-frame counter, so a
+  late or dropped repaint cannot desynchronise it.
+
+**The title screen runs a timer only while a title is actually scrolling.** It
+otherwise runs none at all — it is a static screen, and an idle wakeup is pure
+battery cost. Rather than dropping that rule, the timer is armed and disarmed
+per selection: verified song by song on the emulator, with `Golden` and
+`Love Story` (both of which fit) disarming it and the long titles re-arming it.
+
+**The scroll indicator is a thumb, not a pair of arrows.** Arrows were the
+obvious answer and the wrong one: the gaps above and below the list are **2px**
+on both platforms, so arrows would have had to come out of a song row or a
+control hint. A thumb in a reserved right-hand column costs only width, answers
+"is there more above or below" with the gap above and below it, and also says
+how much more and where in the list you are. It appears only when the list
+actually scrolls, so four songs look exactly as they did before there were five.
+
+### The 2-colour palette, and why the firmware's own reduction is not usable
+
+flint is `PBL_BW`. The SDK still takes `GColor8` there, so the design palette
+**compiles unchanged** — which is the trap. Installing it and decoding the
+screenshot gave exactly two distinct pixel values, and both lane beds (`#555500`
+olive and `#005555` teal) had landed on pure **black**: the same value as the
+background. The lanes had disappeared, along with every cue telling them apart.
+That is not a bug in the reduction — it is a luminance threshold, and it cannot
+know which of two mid-tones was carrying meaning.
+
+`render.c` therefore carries a second palette rather than a squashed copy of the
+first. The rule it follows is that on a black screen **ink is the scarce thing**,
+so anything hue used to carry is carried by shape or position instead:
+
+- beds go black and a lane is drawn as an **outline**, because a white bed would
+  hide the white notes travelling along it;
+- both accents go white — the lanes are already told apart by position and by
+  the badge inside each target ring, which names the buttons that play them;
+- the greys go white, because a mid grey *is* black here and a line of type that
+  reduces to the background is a line nobody ever sees. Type size carries the
+  hierarchy grey used to.
+
+**Notes are hollow on flint, and that was measured, not styled.** With a white
+body a note became a solid white disc — the same value as the rail it travels
+along. A screenshot row through the rail came back white from x=0 to x=99 with
+nothing but the 7px centre dots breaking it: a run of notes read as one long
+white bar. Emptying the body puts a black hole in each one, which separates it
+both from the rail and from its neighbour. Consecutive notes are only ~2px
+apart at the closest *on either platform*, so the gap was never doing that work.
+
+Two things kept the port honest and are worth reusing:
+
+- **The emery screens are byte-identical to before.** Every colour and offset
+  moved behind a named constant, and the emery branch of each reproduces the
+  original literal — verified by building `HEAD` and the port on the same
+  emulator and diffing the PNGs: 0 differing pixels of 45,600 on the title,
+  gameplay and results screens. That is what caught the one real regression:
+  folding the rail into the shared lane helper put a stripe down the margins
+  either side of the title panel, 28 pixels the eye would not have found.
+- **Judge a 2-colour screen by decoding the screenshot, not by looking at it.**
+  Both failures above — the vanished beds and the merged notes — were found by
+  counting pixel values and measuring run lengths in a row. At 144x168 on a
+  laptop, both looked fine.
 
 ## Debug harness
 
