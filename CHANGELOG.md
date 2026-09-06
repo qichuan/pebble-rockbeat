@@ -3,6 +3,13 @@
 ## XX.XX.XX - 20XX-XX-XX
 
 
+## 1.4 - 2026-09-06
+- Support Pebble 2 Duo (flint) alongside Pebble Time 2
+- Add two songs: Love Story and Merry-Go-Round of Life
+- Scroll the song list, with a thumb showing where you are in it
+- Scroll a song title that is too long for its row
+
+
 ## 1.3 - 2026-0804
 - Fixed music drifiting issue
 
