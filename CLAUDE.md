@@ -1,6 +1,7 @@
 # Rockbeat — project guide
 
-Taiko-style rhythm game for Pebble Time 2 (emery), C on Pebble SDK 4.17.
+Taiko-style rhythm game for Pebble Time 2 (emery) and Pebble 2 Duo (flint),
+C on Pebble SDK 4.17.
 
 ## What this is
 
@@ -14,16 +15,17 @@ Taiko-style rhythm game for Pebble Time 2 (emery), C on Pebble SDK 4.17.
 All from `watch/`; the pebble tool fails elsewhere.
 
 ```bash
-pebble build
+pebble build                              # builds BOTH emery and flint
 pebble clean                              # needed after editing package.json
 pebble install --emulator emery
+pebble install --emulator flint           # same build, 144x168 and 2 colours
 pebble screenshot --emulator emery --no-open shot.png
 pebble emu-button --emulator emery click select
 pebble logs --emulator emery
 pebble kill
 ```
 
-From the repo root: `./tools/run_tests.sh` (expect `OK: 3484 checks passed`).
+From the repo root: `./tools/run_tests.sh` (expect `OK: 4376 checks passed`).
 
 This tool version does **not** accept `--scale`. `--vnc` disables emulator audio.
 
@@ -333,6 +335,123 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   spectral-flux onset detector. The MIDI grid is exact where onset detection only
   approximated it, which is what fixed "the notes don't follow any rhythm".)
 
+- **The target list is exactly the Pebbles with a SPEAKER: emery and flint.**
+  Not a preference — the game is one melody line through
+  `speaker_play_tracks()`, so a watch without a speaker gets a rhythm game with
+  no rhythm. `PBL_SPEAKER` is defined for those two and nothing else
+  (`pebble_sdk_platform.py`), and the vendor hardware table agrees.
+  **Gabbro (Round 2) was dropped because it has NO SPEAKER**, not because it is
+  round — the old rationale here was a layout argument, and a layout argument is
+  answerable (this repo answered one for flint). A missing speaker is not.
+  Gabbro is also absent from the SDK manifest schema, so it cannot be named in
+  `targetPlatforms` anyway.
+
+- **flint is 144x168 and TWO COLOURS, and the second half is the expensive
+  half.** `PBL_BW` still takes `GColor8`, so the design palette COMPILES there
+  unchanged — which is the trap. Installed as-is and decoded, the screenshot had
+  exactly two pixel values and both lane beds (#555500 olive, #005555 teal) had
+  landed on pure BLACK, the same as the background: the lanes were gone. The
+  reduction is a luminance threshold and cannot know which mid-tone mattered.
+  `render.c` therefore carries a SECOND palette under `#if defined(PBL_COLOR)`,
+  not a squashed copy of the first.
+  - **Notes are HOLLOW on the 2-colour screen, and that was measured.** A white
+    body made a note a solid white disc — the same value as the RAIL it travels
+    along — and a screenshot row through the rail came back white from x=0 to
+    x=99 with only the 7px centre dots breaking it, so a run of notes read as
+    one white bar. Emptying the body separates the note from the rail AND from
+    its neighbour. The 2px gap between consecutive notes was never doing that
+    work; it is 2px on emery too.
+  - **Judge a 2-colour screen by DECODING the screenshot, not by looking.** Both
+    failures above were found by counting pixel values and measuring run lengths
+    in one row. At 144x168 on a laptop both looked fine.
+  - The greys go WHITE, not black. `GColorDarkGray` reduces to the background,
+    and a hint line that reduces to the background is one the player never sees.
+    Type size carries the hierarchy grey used to.
+
+- **Every layout number and colour is behind a named constant, and the emery
+  branch of each reproduces the ORIGINAL literal.** That is what makes the port
+  checkable: build `HEAD` and the port on the same emulator and diff the PNGs.
+  It came back 0 differing pixels of 45,600 on the title, gameplay and results
+  screens — and it is what caught the one real regression, where folding the rail
+  into the shared lane helper put a stripe down the margins either side of the
+  title panel. 28 pixels; no eye was going to find that.
+  - So the rail belongs to the PLAYFIELD, not to `prv_draw_lane_band()`. The
+    title and results screens draw the lane bands only to teach the button
+    mapping, and a travel line there describes motion that is not happening.
+  - Adding a third screen means adding a third `#if` block in `rb_config.h`,
+    not touching `render.c`.
+
+- **flint's numbers are a second layout, not emery's scaled.** 60px shorter is
+  more than a whole lane. Three things were decided rather than computed:
+  - **95px/s, not 120.** Speed is a LEGIBILITY constraint on both: the tightest
+    same-lane pair is an eighth (254ms) and must be further apart than one note
+    is wide, which at flint's 22px diameter puts the floor near 87px/s. Raising
+    it to match emery would leave 1.1s of music on screen.
+  - **Three song rows, not four.** The fourth would come out of the header or
+    the control hints, and an unreadable hint costs more than a scroll.
+  - **One line of judgment counts, not three,** on the results screen. The ONLY
+    place the two platforms differ in shape rather than size.
+
+- **`RB_MUSIC_CALL_MS` is MEASURED ON EMERY HARDWARE AND UNMEASURED ON FLINT.**
+  170 came from a real Pebble Time 2; a Pebble 2 Duo is a different SoC with a
+  different speaker, so it inherits that number for want of a better one, not
+  because it was checked. It is deliberately ONE constant, not two with the same
+  value, which would read as two measurements. Calibrate on real flint hardware
+  the same way emery was: `RB_DEBUG_LOG_AUDIO`, play a song to its END, read the
+  `resid=` line the last chunk emits, add it. The emulator cannot answer this —
+  it has the opposite sign. (What the flint EMULATOR does confirm is that the
+  audio path runs at all: chunks release against the song clock with 32-38ms of
+  slip and the boundary hands over cleanly.)
+
+- **A title too long for its row scrolls, and the carousel steps by CHARACTER,
+  not by pixel.** That is a limit of this architecture, not a taste: smooth
+  scrolling needs the text CLIPPED to its box, the SDK has no clip-box call
+  (only `layer_set_clips`, which is per whole layer), and everything is drawn
+  into ONE canvas on purpose — see render.h. Letting text overhang would mean
+  repainting the panel border, the panel interior and the lane bands behind it
+  every frame it overhangs. Stepping the START of the string cannot overhang at
+  all, and costs one pointer offset into a string literal.
+  - Steps land on CHARACTER boundaries (`prv_utf8_offset`), not bytes. Every
+    title compiled in today is ASCII, so this is invisible — and it stays
+    invisible the first time one is not, instead of cutting a multi-byte
+    character in half mid-scroll.
+  - `prv_marquee_kmax()` is CACHED on the string POINTER. Titles are string
+    literals in `chart.c`, so the pointer is a stable identity for the string;
+    the scan behind it costs one text measurement per character and would
+    otherwise run every frame.
+  - Only the SELECTED row scrolls. Four titles moving at once in a menu being
+    read is noise, and the selected one is the only title being decided about.
+  - The position comes from a CLOCK, never from a counter incremented per
+    frame, so a late or dropped repaint changes where the text is not at all.
+
+- **The title screen runs a timer ONLY while the selected title is actually
+  scrolling.** This is the one exception to "title, pause and results are
+  static, so an idle wakeup is pure battery cost" (main.c), and it is kept
+  narrow rather than blanket: `prv_title_anim_sync()` re-decides on every screen
+  change and every selection move, so a list of short titles still costs
+  nothing. Verified per song on the emulator — song 1 armed, song 2 (`Golden`,
+  which fits) DISARMED, song 4 re-armed.
+  - It is a SEPARATE timer from the frame timer, not the frame timer at another
+    rate: `prv_frame()` steps the game and feeds the audio, and neither should
+    happen because a title is scrolling.
+  - `RB_MARQUEE_TICK_MS` is half `RB_MARQUEE_STEP_MS` on purpose. Ticking
+    exactly at the step eventually drifts past one and drops a character.
+
+- **The song list's scroll indicator is a thumb, not a pair of arrows, and the
+  reason is VERTICAL space.** The gaps above and below the list are 2px on both
+  platforms, so arrows would have had to come out of a row or a hint. A thumb in
+  a reserved right-hand column costs only width — and it answers "is there more
+  above/below" (the gap above and below it) while also saying how much and where
+  you are. It is drawn only when the list actually scrolls.
+
+- **`pebble kill` can leave `$TMPDIR/pb-emulator.json` claiming emulators are
+  still running when no `qemu-pebble` process exists**, and the next `install`
+  then half-attaches: it reports success, but `screenshot` AND `logs` both hang
+  and time out, which looks exactly like an app that wedged the emulator. Check
+  `ps aux | grep qemu-pebble` against that file before believing the app did it.
+  Full recovery is `pebble kill`, `pkill -9 -f qemu-pebble`, delete the JSON,
+  and move `~/Library/Application Support/Pebble SDK/4.17/emery` aside.
+
 - **The lane LAYOUT is ABSOLUTE, from the design** (which buttons play them is
   the sub-bullets below, and has changed more than once).
   `rb_config.h` carries the exact y bands the design was drawn at (HUD 0-56,
@@ -392,17 +511,52 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   (#555500 reads #564E36, #0055AA reads #16638D). Judge hue relationships, not
   absolute values, and expect the watch to differ again.
 
-- **Two songs, and adding a third is a generator-only change.** `SONGS` in
-  `tools/make_chart.py` is the whole configuration: title, C identifier stem,
-  melody `.mid`, start bar, bar count. `chart_count()` drives the title-screen
+- **Adding a song is a GENERATOR-ONLY change.** `SONGS` in
+  `tools/make_chart.py` is the whole configuration: title, artist, C identifier
+  stem, melody `.mid`, start bar, bar count, and the metre if it is not 4/4.
+  `chart_count()` drives the title-screen
   selector, `save.c` allocates persist keys per song from a base, and
   `render.c`'s list scrolls — so no C file needs editing to make a new song
   appear. The section (which bars) is the one thing that cannot be derived; it
   is a musical judgement.
 
-- **Three songs**: Never Gonna Give You Up (118 BPM, bars 12-40, 157 notes),
-  You Are Not Alone (59 BPM, bars 30-44, 74), Golden (93 BPM, bars 11-39, 146).
-  All ~55-57s. "I Want It That Way" and "Dancing Queen" were removed on request.
+- **Five songs**: Never Gonna Give You Up (118 BPM, bars 12-40, 157 notes),
+  You Are Not Alone (59 BPM, bars 30-44, 74), Golden (93 BPM, bars 11-39, 146),
+  Love Story (117 BPM, bars 81-109, 135), Merry-Go-Round of Life (98 BPM, 3/4,
+  bars 0-35, 87). All ~55-57s except the waltz at 63.8s, which runs long because
+  that is where the music ends -- it states its theme twice and then modulates,
+  and cutting at 57s would stop three bars before the second statement's climax.
+  "I Want It That Way" and "Dancing Queen" were removed on request.
+
+- **Metre is PER SONG (`Song.beats_per_bar`) and is CHECKED, not trusted.** A bar
+  is the unit of three separate things -- the section, the downbeat accent in
+  `build_chart()`, and the chunk boundaries in `build_music()` -- so reading the
+  3/4 waltz as 4/4 does not fail, it accents every fourth beat of a three-beat
+  bar and makes `start_bar` count something that is not a bar. `parse_midi()`
+  therefore returns the metre map, `extract_melody.py` writes it into the melody
+  `.mid`, and `build_song()` rejects a mismatch. The three melodies written
+  before this declare nothing and fall back to 4/4: absence is not disagreement.
+  A file whose metre CHANGES is rejected -- no single value is right for it.
+
+- **The velocity split can eat a quiet passage of the tune.**
+  `melody_velocity_floor()` exists because a piano arrangement separates melody
+  from accompaniment by touch alone, and it cannot tell that from a soft phrase.
+  "Love Story" writes bars 41-46 at velocity 63 against 89-127 either side, so
+  every section spanning them has a **14.6s hole** where the tune stops. Moving
+  the section was far cheaper than weakening the heuristic -- it is right in
+  general and the exception is invisible to it. The tell is a long silence in the
+  section survey, so measure sounding-time per candidate section, not just notes.
+
+- **Skyline is the melody only while the melody is the TOP VOICE, and the check
+  for that is CONTOUR.** The first arrangement of "Merry-Go-Round of Life" put
+  both hands on one channel at one velocity: wherever the right hand rested, the
+  waltz bass became the highest sounding note and was charted as the tune. There
+  was no velocity gap for `melody_velocity_floor()` to find, and the chart was
+  perfectly valid. What separates the two cases is that a melody moves in steps
+  and small leaps -- 32% of that line's intervals were an octave or wider, where
+  the five shipped arrangements measure 0-8%. `SKYLINE_LEAP_WARN_PCT` now warns
+  over 20%. The fix was a different arrangement (a single monophonic flute part),
+  not a new filter.
 
 - **Golden's section starts at bar 11 = 0:25, given as a timestamp.** Convert a
   timestamp to the nearest bar and then CHECK what the melody is doing there:
@@ -427,7 +581,11 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
   the velocity values and drops everything below it, BEFORE the skyline runs;
   afterwards is too late. It returns 0 (keep everything) unless the gap is
   clear, so a merely expressive part is untouched -- measured: Golden splits at
-  95, the other two songs do not split at all.
+  95 and the other four sections do not split at all. It is computed over the
+  SECTION, not the file, so the same song can split in one window and not in
+  another: Love Story splits at 89 in any window covering its bars 41-46 and
+  nowhere else, which is what made those windows unusable -- see the entry on
+  the velocity split eating a quiet passage.
 
 - **Anything expressed in TICKS must be scaled to the file's own division.**
   `MIN_ONSET_TICKS` was derived from `TICKS_PER_BEAT_REQUIRED` (384) but applied
@@ -588,6 +746,9 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 - **Resources are ~4.2 KB** — the menu icon. The app is now publishable
   (previously 893.9 KB against the 256 KB store limit). Keep it that way: do not
   re-add a PCM music resource.
+  - flint has HALF emery's app RAM (64 KB against 128 KB) and it is not close:
+    25 KB footprint, 40 KB of heap free. Check the per-platform block
+    `pebble build` prints if anything large is ever added.
 
 - **The menu icon is BLACK on transparent, and that was measured.** The obvious
   choice is white — the design specifies white, and Pebble's own docs suggest it
@@ -627,7 +788,9 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 
 - **Guard the speaker with `#if PBL_API_EXISTS(speaker_stream_open)`, never
   `#ifdef PBL_SPEAKER`.** Gabbro declares the real functions but does not get the
-  `PBL_SPEAKER` define — an SDK inconsistency.
+  `PBL_SPEAKER` define — an SDK inconsistency. Both shipped targets now DO get
+  `PBL_SPEAKER`, so the two spellings would agree today; keep `PBL_API_EXISTS`
+  anyway, because it tests for the thing actually being called.
 
 - **The Gothic system fonts have no arrow glyphs.** Lane badges are drawn as
   stacked `graphics_fill_rect` rows, not `▲`/`▼` characters, which render as tofu.
@@ -661,7 +824,14 @@ This tool version does **not** accept `--scale`. `--vnc` disables emulator audio
 ./tools/run_tests.sh                              # judgment logic, no emulator
 cd watch && pebble build && pebble install --emulator emery
 pebble screenshot --emulator emery --no-open shot.png   # BEFORE any button press
+
+pebble install --emulator flint                   # then the same on 144x168
+pebble screenshot --emulator flint --no-open flint.png
 ```
+
+A render change is not verified until it has been seen on BOTH screens, and on
+flint that means decoding the PNG as well as looking at it — see the 2-colour
+entry above.
 
 For gameplay frames, set `RB_DEBUG_AUTOPLAY 1` and `RB_DEBUG_FREEZE_AT_MS` to the
 moment you want, then rebuild — and remember the freeze is in *song* time, so you

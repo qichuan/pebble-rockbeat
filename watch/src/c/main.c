@@ -20,6 +20,10 @@ static const Chart *s_chart;
 // out of step with each other.
 static uint8_t s_song;
 
+// Drives the title screen's scrolling title, and nothing else. See
+// prv_title_anim_sync().
+static AppTimer *s_title_timer;
+
 // ---------------------------------------------------------------------------
 // Frame timer -- runs only while a song is actually playing. Title, pause and
 // results are static, so an idle 30Hz wakeup would be pure battery cost.
@@ -41,6 +45,44 @@ static void prv_timer_stop(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Title-screen animation
+//
+// The one exception to "the title screen is static". A song title too long for
+// its row scrolls, and scrolling needs repaints, so this timer exists -- but it
+// is armed ONLY while the selected title actually overflows, and it disarms the
+// moment the selection lands on one that fits. A list of short titles still
+// costs exactly nothing, which is what the static-screen rule was protecting.
+//
+// It is deliberately a SEPARATE timer from the frame timer rather than the
+// frame timer at a different rate: prv_frame() steps the game and feeds the
+// audio, and neither should happen because a title is scrolling.
+// ---------------------------------------------------------------------------
+
+static void prv_title_tick(void *data);
+
+static void prv_title_anim_sync(void) {
+  const bool want = (game_screen() == RB_SCREEN_TITLE) && render_title_animates();
+
+  if (want && s_title_timer == NULL) {
+    s_title_timer = app_timer_register(RB_MARQUEE_TICK_MS, prv_title_tick, NULL);
+  } else if (!want && s_title_timer != NULL) {
+    app_timer_cancel(s_title_timer);
+    s_title_timer = NULL;
+  }
+}
+
+static void prv_title_tick(void *data) {
+  s_title_timer = NULL;
+  (void)data;
+
+  if (game_screen() != RB_SCREEN_TITLE || !render_title_animates()) {
+    return;  // nothing moving: stop, rather than reschedule
+  }
+  layer_mark_dirty(s_canvas);
+  s_title_timer = app_timer_register(RB_MARQUEE_TICK_MS, prv_title_tick, NULL);
+}
+
+// ---------------------------------------------------------------------------
 // Screen transitions
 // ---------------------------------------------------------------------------
 
@@ -49,6 +91,10 @@ static void prv_timer_stop(void) {
 static void prv_enter_screen(RbScreen screen) {
   game_set_screen(screen);
   layer_mark_dirty(s_canvas);
+  // Every screen change routes through here, so this is the one place the
+  // title carousel's timer has to be re-decided -- arming it on the way in and
+  // disarming it on the way out, without either caller having to remember.
+  prv_title_anim_sync();
 }
 
 static void prv_enter_title(void) {
@@ -185,6 +231,9 @@ static void prv_on_lane_hit(uint8_t lane, ButtonId button,
                 (unsigned)s_song, (unsigned)chart_count(), s_chart->title);
 #endif
         layer_mark_dirty(s_canvas);
+        // The new selection may scroll where the old one did not, or the other
+        // way round, so the timer is re-decided on every move.
+        prv_title_anim_sync();
       }
       break;
 
