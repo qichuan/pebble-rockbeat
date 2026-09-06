@@ -24,21 +24,124 @@
 #define RB_FRAME_MS 40
 
 // ---------------------------------------------------------------------------
-// Vertical layout -- taken directly from the design, composed at 200x228.
+// Screen layout
 //
-//    0..56    HUD          score left, combo right
-//   56..106   lane TOP     UP button
-//  106..112   gutter
-//  112..162   lane BOT     SELECT button
-//  162..168   gutter
-//  168..220   song band    art tile + title/artist
-//  220..228   progress
+// TWO screens ship and they are not the same shape:
 //
-// These are absolute because the design is: it was drawn at this exact size for
-// this exact screen, and deriving them from bounds would only invent a layout
-// nobody drew. The one thing still read from bounds at draw time is the WIDTH,
-// so the right-hand furniture stays anchored if the canvas ever differs.
+//   emery (Pebble Time 2)  200x228, 64 colours, 128KB app RAM
+//   flint (Pebble 2 Duo)   144x168,  2 colours,  64KB app RAM
+//
+// They are the only two platforms with a speaker (PBL_SPEAKER is defined for
+// emery and flint and for nothing else), and this game is unplayable without
+// one, so they are the whole target list -- see the platform note in README.
+//
+// The emery numbers below are the DESIGN's, taken from a composition drawn at
+// exactly 200x228. They are absolute because the design is; deriving them from
+// layer_get_bounds() would only invent a layout nobody drew.
+//
+// flint is 56px narrower and 60px shorter, which is not a scale factor away
+// from that -- 60px is more than a whole lane. Its numbers are therefore a
+// second layout rather than emery's divided by anything, and the constraints
+// that actually fixed them are recorded next to each. The one thing still read
+// from bounds at draw time is the WIDTH, so right-hand furniture stays anchored.
+//
+// Only offsets and thicknesses live here. Adding a third screen means adding a
+// third block, not touching render.c.
+//
+// Vertical budget, and both columns must sum to the screen height exactly:
+//
+//                        emery      flint
+//   HUD                   0..56      0..38    score left, combo right
+//   lane TOP             56..106    38..76    UP button
+//   gutter              106..112    76..80
+//   lane BOT            112..162    80..118   SELECT and DOWN
+//   gutter              162..168   118..122
+//   song band           168..220   122..160   art tile + title/artist
+//   progress            220..228   160..168
 // ---------------------------------------------------------------------------
+
+#if defined(PBL_PLATFORM_FLINT)
+
+// --- flint: 144x168 -------------------------------------------------------
+
+// 38 is the floor for the HUD, not a proportional shrink: the score numeral
+// drops to GOTHIC_18_BOLD and the combo to LECO_20, and those two plus their
+// labels are what 38px holds.
+#define RB_HUD_H 38
+#define RB_LANE_TOP_Y 38
+#define RB_LANE_BOT_Y 80
+#define RB_LANE_H 38
+#define RB_LANE_RAIL_DY 18
+#define RB_LANE_RAIL_H 2
+
+#define RB_TARGET_ZONE_X 100
+#define RB_TARGET_DIVIDER_X 98
+#define RB_TARGET_DIVIDER_W 2
+
+#define RB_BAND_Y 122
+#define RB_BAND_H 38
+#define RB_BAND_ART_W 46
+#define RB_BAND_RULE_W 2
+#define RB_BAND_DISC_R 11
+#define RB_BAND_HOLE_R 3
+
+// A 38px band cannot hold a wrapped two-line title AND the artist: GOTHIC_14
+// lines are ~16px, so two of them plus the artist is 48. The title therefore
+// gets ONE line and ellipsises, which is why the overflow mode is a constant.
+#define RB_BAND_TITLE_DY 1
+#define RB_BAND_TITLE_H 18
+#define RB_BAND_TITLE_OVERFLOW GTextOverflowModeTrailingEllipsis
+#define RB_BAND_ARTIST_DY 19
+
+#define RB_PROGRESS_Y 160
+#define RB_PROGRESS_H 8
+
+// Target centre. The zone is 100..144; 121 sits just right of its middle, the
+// same way 176 does inside emery's 148..200.
+#define RB_TARGET_CX 121
+#define RB_TARGET_R 15
+#define RB_TARGET_RING_W 4
+
+// The PERFECT core inside a struck ring, as an inset from the ring's inner
+// edge: r = R - RING_W - INSET, so 7 here. It is not scaled straight down from
+// emery's 6 because on a 2-colour screen this core is the ONLY thing telling a
+// PERFECT from a GOOD, and 4 keeps it from shrinking to a speck.
+#define RB_TARGET_CORE_INSET 4
+
+// Fits inside RB_TARGET_R - RB_TARGET_RING_W (11px) with air: the worst pixel
+// is a corner at (6,5), r=7.8.
+#define RB_ARROW_LEN 10
+#define RB_ARROW_HALF 6
+
+// r=14 for a big note spans 5..33 inside a 38px lane, so it still clears the
+// bed edges. The centre dot comes down with the radius or it swallows the ring.
+#define RB_NOTE_R_NORMAL 11
+#define RB_NOTE_R_BIG 14
+#define RB_NOTE_RING_W 3
+#define RB_NOTE_DOT_R 3
+
+#define RB_CULL_MARGIN 18
+
+// Speed is a LEGIBILITY constraint here exactly as it is on emery, and the
+// binding case is the same one: the tightest SAME-lane pair is an eighth,
+// 254ms, and it has to be further apart than one normal note is wide or a run
+// of eighths merges into a smear. At 95px/s that pair is 24px against a 22px
+// diameter. Travel is -11..121 = 132px, so the read-ahead is ~1.4s, close to
+// emery's 1.6s -- the note is not on screen for less TIME, only less distance.
+// Do not raise this to "match" emery: at 120px/s a flint screen holds 1.1s of
+// music, which is under the reaction time this game asks for.
+#define RB_SCROLL_PX_PER_SEC 95
+
+// "PERFECT!" in GOTHIC_14_BOLD is ~56px, so the plate cannot go below ~62 and
+// still hold the longest word. 4..68 clears the target zone at 100.
+#define RB_POPUP_W 64
+#define RB_POPUP_H 22
+#define RB_POPUP_INSET_X 4
+#define RB_POPUP_TEXT_DY 2
+
+#else
+
+// --- emery: 200x228 (the design) ------------------------------------------
 
 #define RB_HUD_H 56          // score + combo band across the top
 #define RB_LANE_TOP_Y 56
@@ -60,17 +163,24 @@
 #define RB_BAND_DISC_R 15    // the record on the art tile
 #define RB_BAND_HOLE_R 4
 
+// The design breaks two-word titles across lines, and letting the layout engine
+// wrap means a new song needs no per-song line breaking in the generator.
+#define RB_BAND_TITLE_DY (-3)
+#define RB_BAND_TITLE_H 34
+#define RB_BAND_TITLE_OVERFLOW GTextOverflowModeWordWrap
+#define RB_BAND_ARTIST_DY 29
+
 #define RB_PROGRESS_Y 220
 #define RB_PROGRESS_H 8
-
-// ---------------------------------------------------------------------------
-// Horizontal layout
-// ---------------------------------------------------------------------------
 
 // Target centre. The design puts a 40x40 ring at x=156, so its centre is 176.
 #define RB_TARGET_CX 176
 #define RB_TARGET_R 20
 #define RB_TARGET_RING_W 5
+
+// The white PERFECT core inside a struck ring, as an inset from the ring's
+// inner edge: r = R - RING_W - INSET, so 9 here.
+#define RB_TARGET_CORE_INSET 6
 
 // The arrow badge inside a resting target ring: 12px along its axis, 8px either
 // side of it. Sized to sit inside RB_TARGET_R - RB_TARGET_RING_W (15px) with a
@@ -109,6 +219,9 @@
 #define RB_POPUP_W 68
 #define RB_POPUP_H 30
 #define RB_POPUP_INSET_X 6   // from the lane's left edge
+#define RB_POPUP_TEXT_DY 5
+
+#endif
 
 // ---------------------------------------------------------------------------
 // Judgment windows (milliseconds either side of the note's hit_time_ms)
@@ -348,6 +461,20 @@
 // to tell an emulator from a watch -- so THE WATCH WINS AND THE EMULATOR IS NOW
 // KNOWN-WRONG BY ROUGHLY THIS AMOUNT. Do not "fix" audio sync from an emulator
 // session; it can no longer answer that question.
+//
+// UNMEASURED ON FLINT. Everything above was measured on a real Pebble Time 2.
+// flint is a Pebble 2 Duo -- a different SoC, a different speaker and a
+// different audio path -- so there is no reason 170 is its number, only no
+// reason to prefer any other one yet. It is deliberately NOT split into two
+// constants: a second #define holding the same value would read as two
+// measurements when there is one, and the honest state is one measurement
+// applied to two watches.
+//
+// To calibrate it on a Pebble 2 Duo, do exactly what was done for emery: set
+// RB_DEBUG_LOG_AUDIO, play a song to its END on the hardware, and read the
+// `resid=` line the LAST chunk emits -- it equals (actual call latency minus
+// this constant), so add it. One sample per playthrough, and the emulator
+// cannot stand in: it has the opposite sign.
 #define RB_MUSIC_CALL_MS 170
 
 // Residual trim on the whole music timeline. Positive starts the music LATER.
@@ -402,13 +529,95 @@
 // asserted against chart_count() at startup.
 #define RB_MAX_SONGS 8
 
-// Title screen song list.
+// ---------------------------------------------------------------------------
+// Menus and HUD -- fonts and geometry, per platform.
 //
-// Sized so all four songs are visible at once: scrolling a list this short is
-// worse than a slightly tighter row, because a song you cannot see is a song you
-// do not know is there. Beyond RB_TITLE_ROWS the list scrolls around the
-// selection rather than running off the bottom, so a fifth song still works --
-// it just stops being visible all at once.
+// The playfield scales by moving rects around; these screens do not, because
+// they are almost entirely TYPE and type comes in fixed sizes. flint has 60
+// fewer vertical pixels to spend on the same eight rows of the results screen,
+// so the fonts step down a size and the three judgment counts fold onto one
+// line. That fold is the only place the two platforms show different
+// INFORMATION rather than the same information at a different size.
+//
+// Every offset below is relative to its panel, so retuning a panel moves its
+// contents with it.
+// ---------------------------------------------------------------------------
+
+#if defined(PBL_PLATFORM_FLINT)
+
+// --- title ---
+// Panel 10..158 is 148px: header 34, three 18px rows, then the best line, the
+// action hint and the control hint, ending at 156.
+//
+// THREE rows, not emery's four. There are five songs, so the list scrolls on
+// both -- the fourth row would have to come out of the header or the hints, and
+// a hint the player cannot read costs more than a song they have to scroll to.
+#define RB_TITLE_PANEL_Y 10
+#define RB_TITLE_PANEL_H 148
+#define RB_TITLE_LIST_Y 44
+#define RB_TITLE_ROW_H 18
+#define RB_TITLE_ROWS 3
+#define RB_TITLE_FONT FONT_KEY_GOTHIC_24_BOLD
+#define RB_TITLE_HEADER_H 28
+
+// Column reserved at the right of the list for the scroll indicator. It comes
+// out of the row plate, so it is the one cost the indicator has -- 7px of a
+// 144px screen, and the titles here already scroll, so the width they lose is
+// width they were not keeping.
+#define RB_TITLE_SCROLL_W 7
+#define RB_TITLE_SCROLL_BAR_W 3
+#define RB_TITLE_SCROLL_MIN_H 8
+
+// The band title is ONE line here (see RB_BAND_TITLE_H), so a long one has
+// nowhere to wrap to and scrolls instead. emery's wraps to two lines and does
+// not need this.
+#define RB_BAND_TITLE_MARQUEE 1
+
+// --- HUD ---
+#define RB_HUD_SCORE_FONT FONT_KEY_GOTHIC_18_BOLD
+#define RB_HUD_SCORE_DY 8
+#define RB_HUD_SCORE_H 24
+#define RB_HUD_SCORE_W 72
+#define RB_HUD_COMBO_FONT FONT_KEY_LECO_20_BOLD_NUMBERS
+#define RB_HUD_COMBO_DY (-4)
+#define RB_HUD_COMBO_H 28
+#define RB_HUD_COMBO_W 62
+#define RB_HUD_LABEL_DY 21
+#define RB_HUD_PAD_X 5
+#define RB_HUD_PAD_R 5
+
+// --- pause ---
+#define RB_PAUSE_PANEL_Y 38
+#define RB_PAUSE_PANEL_H 96
+#define RB_PAUSE_TITLE_FONT FONT_KEY_GOTHIC_24_BOLD
+#define RB_PAUSE_TITLE_DY 6
+#define RB_PAUSE_ROW1_DY 38
+#define RB_PAUSE_ROW2_DY 58
+#define RB_PAUSE_ROW3_DY 74
+
+// --- results ---
+// Panel 6..162 is 156px. Rows land at 8, 40, 72, 88, 112, 132 and the last one
+// ends at 150, so "NEW BEST" appearing never pushes anything off the panel.
+#define RB_RESULT_PANEL_Y 6
+#define RB_RESULT_PANEL_H 156
+#define RB_RESULT_RANK_DY 2
+#define RB_RESULT_SCORE_DY 34
+#define RB_RESULT_SCORE_H 34
+#define RB_RESULT_BEST_DY 66
+#define RB_RESULT_ACC_DY 82
+#define RB_RESULT_COUNTS_DY 106
+#define RB_RESULT_COUNTS_STEP 0   // 0 folds the three counts onto one line
+#define RB_RESULT_COMBO_DY 126
+
+#else
+
+// --- title ---
+// Four rows, and there are now five songs, so the list DOES scroll -- it moves
+// around the selection rather than running off the bottom. Four is not a target
+// to keep hitting: it is what the vertical budget below affords at a legible row
+// height, and a fifth row would have to come out of the header or the hints.
+// A song you cannot see is a song you do not know is there, so if the list grows
+// much further it wants a scroll indicator rather than another row.
 //
 // The vertical budget is exact. Panel 26..204 is 178px: header 32, four 21px
 // rows, then the best line, the action hint and the control hint. Changing any
@@ -418,6 +627,88 @@
 #define RB_TITLE_LIST_Y 62
 #define RB_TITLE_ROW_H 21
 #define RB_TITLE_ROWS 4
+#define RB_TITLE_FONT FONT_KEY_GOTHIC_24_BOLD
+#define RB_TITLE_HEADER_H 30
+
+// Column reserved at the right of the list for the scroll indicator.
+#define RB_TITLE_SCROLL_W 8
+#define RB_TITLE_SCROLL_BAR_W 3
+#define RB_TITLE_SCROLL_MIN_H 10
+
+// The band title WRAPS to two lines here, which is the design's own answer to a
+// long title, so it never needs to scroll.
+#define RB_BAND_TITLE_MARQUEE 0
+
+// --- HUD ---
+#define RB_HUD_SCORE_FONT FONT_KEY_GOTHIC_24_BOLD
+#define RB_HUD_SCORE_DY 13
+#define RB_HUD_SCORE_H 32
+#define RB_HUD_SCORE_W 110
+#define RB_HUD_COMBO_FONT FONT_KEY_LECO_32_BOLD_NUMBERS
+#define RB_HUD_COMBO_DY (-6)
+#define RB_HUD_COMBO_H 42
+#define RB_HUD_COMBO_W 90
+#define RB_HUD_LABEL_DY 35
+#define RB_HUD_PAD_X 7
+// 8 puts the combo box at w-98, which is where the design has it.
+#define RB_HUD_PAD_R 8
+
+// --- pause ---
+#define RB_PAUSE_PANEL_Y 58
+#define RB_PAUSE_PANEL_H 112
+#define RB_PAUSE_TITLE_FONT FONT_KEY_GOTHIC_28_BOLD
+#define RB_PAUSE_TITLE_DY 8
+#define RB_PAUSE_ROW1_DY 46
+#define RB_PAUSE_ROW2_DY 70
+#define RB_PAUSE_ROW3_DY 88
+
+// --- results ---
+#define RB_RESULT_PANEL_Y 14
+#define RB_RESULT_PANEL_H 200
+#define RB_RESULT_RANK_DY 4
+#define RB_RESULT_SCORE_DY 40
+#define RB_RESULT_SCORE_H 38
+#define RB_RESULT_BEST_DY 78
+#define RB_RESULT_ACC_DY 98
+#define RB_RESULT_COUNTS_DY 124
+#define RB_RESULT_COUNTS_STEP 17  // one line per judgment
+#define RB_RESULT_COMBO_DY 178
+
+#endif
+
+// ---------------------------------------------------------------------------
+// Title carousel -- a song title too long for its row scrolls through it.
+//
+// It steps by CHARACTER, not by pixel, and that is a limit of this
+// architecture rather than a taste: pixel-smooth scrolling needs the text
+// CLIPPED to its box, the SDK exposes no clip-box call (only layer_set_clips,
+// which is per whole layer), and this app draws everything into ONE canvas on
+// purpose -- see render.h. Masking the spill by hand would mean repainting the
+// panel border, the panel interior and the lane bands behind it every frame,
+// for every frame the text happens to overhang. A character step costs one
+// pointer offset into a string literal and cannot spill at all.
+//
+// Steps are taken on CHARACTER boundaries, not bytes, so a multi-byte title
+// cannot be cut in half.
+// ---------------------------------------------------------------------------
+
+// One character every quarter second. Fast enough to finish a long title
+// inside a few seconds, slow enough to read while it moves.
+#define RB_MARQUEE_STEP_MS 250
+
+// Stillness at each end of the travel, so the beginning and the end of the
+// title can each actually be read rather than swept past.
+#define RB_MARQUEE_HOLD_MS 1200
+
+// How often the TITLE screen repaints while a title is scrolling.
+//
+// The title screen otherwise runs NO timer at all, deliberately: it is static,
+// so an idle wakeup is pure battery cost (see main.c). This is the exception,
+// and it is kept narrow -- the timer runs only while the SELECTED title
+// actually overflows its row, and stops the moment the selection moves to one
+// that fits. Half of RB_MARQUEE_STEP_MS, so a step is never lost to aliasing;
+// ticking exactly at the step would eventually drift past one.
+#define RB_MARQUEE_TICK_MS 125
 
 // Results ranks, in accuracy percent.
 #define RB_RANK_S_PCT 95

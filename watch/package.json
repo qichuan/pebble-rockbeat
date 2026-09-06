@@ -17,7 +17,8 @@
     "sdkVersion": "3",
     "enableMultiJS": true,
     "targetPlatforms": [
-      "emery"
+      "emery",
+      "flint"
     ],
     "watchapp": {
       "watchface": false

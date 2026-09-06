@@ -20,3 +20,11 @@
 #include <pebble.h>
 
 void render_update_proc(Layer *layer, GContext *ctx);
+
+// Whether the title screen currently has anything moving on it -- i.e. whether
+// the SELECTED song's title is too long for its row and is scrolling.
+//
+// main.c asks before arming the only timer that screen ever runs. Keeping the
+// question here rather than there is what stops main.c from having to know the
+// row's width, the font, or how the carousel decides it has work to do.
+bool render_title_animates(void);
