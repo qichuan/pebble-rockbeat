@@ -5,7 +5,9 @@ Right now you can play the following songs:
   Never Gonna Give You Up — Rick Astley
   You Are Not Alone — M. Jackson
   Golden — HUNTR/X
+  Love Story - Taylor Swift
+  Merry-Go-Round of Life - Joe Hisaishi 
 
 Let me know what other songs you want to add to the list!
 
-This game requires a speaker, so it works only on the Pebble Time 2 for now. Support for Pebble Round 2 may be added in the future.
+This game requires a speaker, so it works only on the Pebble Time 2 and Pebble 2 Duo.
